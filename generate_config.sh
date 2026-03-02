@@ -2,19 +2,44 @@
 
 SECRETS_FOUND=0
 IS_OVERWRITING=0
+DOMAIN=
+
+usage() {
+    echo "Usage: ./generate_config.sh [--overwrite] DOMAIN"
+    exit 1
+}
 
 loadSecrets() {
     SECRETS_FOUND=1
     set -a && source secrets.env && set +a
 }
 
+# Check args to ensure correct usage
+# No args is not valid
+if [[ $# -eq 1 ]]; then
+    if [[ $1 = --* ]]; then
+        usage
+    fi
+    DOMAIN=$1
+elif [[ $# -eq 2 ]]; then
+    if [[ $1 != --overwrite ]]; then
+        usage
+    fi
+    if [[ $2 = --* ]]; then
+        usage
+    fi
+    DOMAIN=$2
+    IS_OVERWRITING=1
+else
+    usage
+fi
+
 if test -f "secrets.env"; then
     loadSecrets
 fi
 
 if test -f "Revolt.toml"; then
-    if [[ \ $*\  = *\ --overwrite\ * ]]; then
-        IS_OVERWRITING=1
+    if [[ $IS_OVERWRITING -eq 1 ]]; then
         if [ "$SECRETS_FOUND" -eq "0" ]; then
             echo "Overwrite flag passed, but secrets.env not found. This script will refuse to execute an overwrite without secrets.env."
             echo "If you are absolutely sure you want to overwrite your secrets with new secrets, copy the secrets.env.example file without modifying it's contents using command 'cp secrets.env.example secrets.env'."
@@ -38,8 +63,7 @@ if test -f "Revolt.toml"; then
         fi
         echo "This script will back up your old config if you choose to overwrite."
         echo "To overwrite the existing config, run the script again with the --overwrite flag"
-        echo "$0 $* --overwrite"
-        exit 1
+        usage
     fi
 fi
 
@@ -48,7 +72,9 @@ if [ "$SECRETS_FOUND" -eq "0" ]; then
     loadSecrets
 fi
 
-STOAT_HOSTNAME="https://$1"
+echo "Configuring Stoat with hostname $DOMAIN"
+
+STOAT_HOSTNAME="https://$DOMAIN"
 
 read -rp "Would you like to place Stoat behind another reverse proxy? [y/N]: "
 if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
@@ -123,24 +149,24 @@ fi
 
 # set hostname for Caddy and vite variables
 echo "HOSTNAME=$STOAT_HOSTNAME" > .env.web
-echo "REVOLT_PUBLIC_URL=https://$1/api" >> .env.web
-echo "VITE_API_URL=https://$1/api" >> .env.web
-echo "VITE_WS_URL=wss://$1/ws" >> .env.web
-echo "VITE_MEDIA_URL=https://$1/autumn" >> .env.web
-echo "VITE_PROXY_URL=https://$1/january" >> .env.web
+echo "REVOLT_PUBLIC_URL=https://$DOMAIN/api" >> .env.web
+echo "VITE_API_URL=https://$DOMAIN/api" >> .env.web
+echo "VITE_WS_URL=wss://$DOMAIN/ws" >> .env.web
+echo "VITE_MEDIA_URL=https://$DOMAIN/autumn" >> .env.web
+echo "VITE_PROXY_URL=https://$DOMAIN/january" >> .env.web
 
 # hostnames
 echo "[hosts]" > Revolt.toml
-echo "app = \"https://$1\"" >> Revolt.toml
-echo "api = \"https://$1/api\"" >> Revolt.toml
-echo "events = \"wss://$1/ws\"" >> Revolt.toml
-echo "autumn = \"https://$1/autumn\"" >> Revolt.toml
-echo "january = \"https://$1/january\"" >> Revolt.toml
+echo "app = \"https://$DOMAIN\"" >> Revolt.toml
+echo "api = \"https://$DOMAIN/api\"" >> Revolt.toml
+echo "events = \"wss://$DOMAIN/ws\"" >> Revolt.toml
+echo "autumn = \"https://$DOMAIN/autumn\"" >> Revolt.toml
+echo "january = \"https://$DOMAIN/january\"" >> Revolt.toml
 
 # livekit hostname
 echo "" >> Revolt.toml
 echo "[hosts.livekit]" >> Revolt.toml
-echo "worldwide = \"wss://$1/livekit\"" >> Revolt.toml
+echo "worldwide = \"wss://$DOMAIN/livekit\"" >> Revolt.toml
 
 # VAPID keys
 echo "" >> Revolt.toml
@@ -184,6 +210,6 @@ echo "lon = 0.0" >> Revolt.toml
 echo "key = \"$LIVEKIT_WORLDWIDE_KEY\"" >> Revolt.toml
 echo "secret = \"$LIVEKIT_WORLDWIDE_SECRET\"" >> Revolt.toml
 
-if [ "$IS_OVERWRITING" -eq "1" ]; then
+if [[ $IS_OVERWRITING -eq 1 ]]; then
     echo "Overwrote existing config. If any custom configuration was present in old Revolt.toml, you may now copy it over from Revolt.toml.old."
 fi

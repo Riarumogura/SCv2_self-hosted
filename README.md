@@ -200,7 +200,7 @@ Ensure that your secrets in `Revolt.toml` and `secrets.env` match. If your secre
 Run the configuration script with your domain and pass the overwrite flag:
 
 ```bash
-./generate_config.sh your.domain --overwrite
+./generate_config.sh --overwrite your.domain
 ```
 
 Then pull all the latest images:
