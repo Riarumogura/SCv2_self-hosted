@@ -30,7 +30,7 @@ This repository contains configurations and instructions that can be used for de
   - [Secure your server](#secure-your-server)
   - [Configure your domain](#configure-your-domain)
   - [Install Required Dependencies](#install-required-dependencies)
-- [Configuring](#configuring)
+- [Configuration](#configuration)
 - [Updating](#updating)
 - [Additional Notes](#additional-notes)
   - [Placing Behind Another Reverse-Proxy or Another Port](#placing-behind-another-reverse-proxy-or-another-port)
@@ -38,6 +38,7 @@ This repository contains configurations and instructions that can be used for de
   - [Mongo Compatibility](#mongo-compatibility)
   - [KeyDB Compatibility](#keydb-compatibility)
   - [Making Your Instance Invite-only](#making-your-instance-invite-only)
+  - [Why ports 7881 and 50000-50100/udp aren't in the Caddyfile](#why-ports-7881-and-50000-50100udp-arent-in-the-caddyfile)
 - [Notices](#notices)
 - [Security Advisories](#security-advisories)
 
@@ -277,7 +278,7 @@ services:
       - "27017:27017"
 ```
 
-For obvious reasons, be careful doing this.
+Docker will bypass your ufw rules when you do this. This means that if the port is open, the database will be publically accessible and anyone will be able to modify it.
 
 ### Mongo Compatibility
 
@@ -326,19 +327,21 @@ use revolt
 db.invites.insertOne({ _id: "enter_an_invite_code_here" })
 ```
 
+### Why ports 7881 and 50000-50100/udp aren't in the Caddyfile
+
+Livekit requires ports 7881/tcp and 50000-50100/udp to be openly accessible on the internet. These ports are used for the RTC protocol. Caddy does not support RTC without significant configuration changes that are out of scope of this repo.
+
 ## Notices
 
 <details>
 <summary>If you deployed Stoat before October 5, 2025...</summary>
 
-> [!IMPORTANT]
 > If you deployed Stoat before [2022-10-29](https://github.com/minio/docs/issues/624#issuecomment-1296608406), you may have to tag the `minio` image release if it's configured in "fs" mode.
 >
 > ```yml
 > image: minio/minio:RELEASE.2022-10-24T18-35-07Z
 > ```
 
-> [!IMPORTANT]
 > If you deployed Stoat before [2023-04-21](https://github.com/stoatchat/stoatchat/commit/32542a822e3de0fc8cc7b29af46c54a9284ee2de), you may have to flush your Redis database.
 >
 > ```bash
@@ -351,7 +354,6 @@ db.invites.insertOne({ _id: "enter_an_invite_code_here" })
 > FLUSHDB
 > ```
 
-> [!IMPORTANT]
 > As of 30th September 2024, Autumn has undergone a major refactor, which requires a manual migration.
 >
 > To begin, add a temporary container that we can work from:
@@ -381,7 +383,6 @@ db.invites.insertOne({ _id: "enter_an_invite_code_here" })
 > node ./20240929-autumn-rewrite.mjs
 > ```
 
-> [!IMPORTANT]
 > As of November 28, 2024, the following breaking changes have been applied:
 >
 > - Rename config section `api.vapid` -> `pushd.vapid`
@@ -394,7 +395,6 @@ db.invites.insertOne({ _id: "enter_an_invite_code_here" })
 >
 > - Added `rabbit` (RabbitMQ) and `pushd` (Stoat push daemon)
 
-> [!IMPORTANT]
 > As of October 5, 2025, the following breaking changes have been applied:
 >
 > - Rename docker compose project from revolt to stoat
