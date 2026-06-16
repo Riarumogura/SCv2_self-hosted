@@ -24,3 +24,5 @@ video_aspect_ratio = [0.3, 10]
 [features.limits.default]
 video_resolution = [1920, 1080]
 video_aspect_ratio = [0.3, 10]
+attachment_size = 5368709120
+emoji_size = 10485760
