@@ -1,0 +1,26 @@
+# All secrets are stored in secrets.env
+# Any configuration added to this file will be overwritten by generate_config on run; however,
+# the script will back up your old configuration so you can copy over your old configuration
+# values if needed.
+[hosts]
+app = "http://local.sawarachats.chat"
+api = "http://local.sawarachats.chat/api"
+events = "ws://local.sawarachats.chat/ws"
+autumn = "http://local.sawarachats.chat/autumn"
+january = "http://local.sawarachats.chat/january"
+
+[hosts.livekit]
+worldwide = "ws://local.sawarachats.chat/livekit"
+
+[api.livekit.nodes.worldwide]
+url = "http://livekit:7880"
+lat = 0.0
+lon = 0.0
+
+[features.limits.new_user]
+video_resolution = [1920, 1080]
+video_aspect_ratio = [0.3, 10]
+
+[features.limits.default]
+video_resolution = [1920, 1080]
+video_aspect_ratio = [0.3, 10]
