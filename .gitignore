@@ -11,3 +11,4 @@ secrets.env.old
 
 compose.override.yml
 compose.override.yml.old
+secrets.env.backup
