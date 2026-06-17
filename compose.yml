@@ -216,8 +216,35 @@ services:
         echo 'Waiting minio...' && sleep 1;
       done;
       /usr/bin/mc mb minio/revolt-uploads;
+      /usr/bin/mc mb minio/revolt-storage;
       exit 0;
       "
+
+  # Storage API
+  storage-api:
+    build: ./services/storage-api
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minioautumn
+      MINIO_SECRET_KEY: minioautumn
+      MINIO_BUCKET: revolt-storage
+      MINIO_USE_SSL: "false"
+      MONGODB_URI: mongodb://database:27017
+      MONGODB_DB_NAME: sawarachats
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      STOAT_API_URL: http://api:3000
+      CORS_ORIGIN: http://local.sawarachats.chat
+      DEFAULT_SERVER_STORAGE_LIMIT: "274877906944"
+    ports:
+      - "3001:3000"
 
   # Web App
   web:
