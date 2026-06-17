@@ -48,5 +48,12 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /storage* {
+		uri strip_prefix /storage
+		reverse_proxy http://storage-api:3001 {
+			header_down Location "^/" "/storage/"
+		}
+	}
+
 	reverse_proxy http://web:5000
 }
