@@ -358,6 +358,14 @@ docker compose up -d web
 `docker build`/`docker compose up -d web` で反映し、Playwright(ヘッドレスChrome)で画像添付ファイルを送信→右クリックでファイル用コンテキストメニューを開き、「ストレージに保存」(現状はi18nカタログ未再生成のためハッシュ文字列表示、8章までと同じ既知バグ)のサブメニューが描画されることを確認。ホバーのみでサブメニューを開いた状態で「Loading storages...」の文字列がページ上に残らないことを確認した。
 ただし、ホバーのみでサブメニューを開いた直後の表示内容(ストレージ名の一覧が描画されているか)については、ヘッドレスChromeでの自動テスト中にグローバルな「メニュー外クリックで閉じる」リスナー(`FloatingManager.tsx` の `document.addEventListener("mousedown"/"click", ...)`)とPlaywrightの合成イベントが干渉し、メニューが安定して開いたままにならず自動検証しきれなかった。コード上の原因と修正内容は上記の通り単純かつ確実なロジック変更であり、実機のブラウザでの手動確認を推奨する。
 
-### 副次的に見つかった別の既知ギャップ(未修正)
+### 追加修正: 汎用ファイル/テキストファイル添付で「ストレージに保存」が一切開けない問題
 
-`components/ui/components/features/messaging/elements/Attachment.tsx` の `Match when={props.file.metadata.type === "File"}` および `"Text"` の分岐には、Image/Video/Audioと異なり `use:floating={{ contextMenu: ... }}` が配線されていない。そのため、汎用ファイル添付やテキストファイル添付を右クリックすると、添付固有のコンテキストメニュー(「ストレージに保存」を含む)が一切開かず、メッセージ全体の汎用コンテキストメニューにフォールバックしてしまう。今回はメッセージコンテキストメニュー自体の不具合修正にとどめ、このギャップへの対応(File/Text用のコンテキストメニュー配線追加)は別タスクとして扱うことを推奨する。
+上記の調査中に見つかった `Attachment.tsx` の `"File"`/`"Text"` 分岐のギャップ(Image/Video/Audioと異なり `use:floating={{ contextMenu: ... }}` が配線されておらず、添付固有のコンテキストメニューが一切開かない)も併せて修正した。
+
+**原因(2段階)**:
+1. `Attachment.tsx` の `"File"`/`"Text"` のMatch分岐には、そもそも `use:floating` が配線されていなかった。
+2. 配線を追加する際、`AttachmentContainer`(styled(Column,...)で作られたカスタムコンポーネント)に直接 `use:floating` を付けても効果がなかった。これはSolidJSの `use:` ディレクティブがネイティブDOM要素(`div`・`img`等の小文字タグ)にしか効かず、カスタムコンポーネント上では単なる無視されるpropになってしまうという仕様上の制約による。Image/Video/Audioの既存実装が動いていたのは、それぞれ `<img>`/`<video>`/`<audio>` という生のDOM要素に直接ディレクティブを付けていたため。
+
+**修正内容**: `"File"`/`"Text"` のMatch分岐で、`AttachmentContainer` を `style={{ display: "contents" }}` を付けた素の `<div use:floating={{ contextMenu: ... }}>` でラップした。`display: contents` によりこのdiv自体はボックスを生成しないためレイアウトに影響を与えず、かつ実DOM要素としてイベントリスナーを配線できる。
+
+**動作確認**: テキストファイル(`.txt`)添付を右クリックすると、添付固有のコンテキストメニュー(Open File / リンクをコピー / Save File / ストレージに保存サブメニュー)が開くことをPlaywrightで確認した(修正前は返信・未読にする等のメッセージ全体向けの汎用メニューしか出ず、添付固有の項目が一切表示されなかった)。
