@@ -29,16 +29,17 @@ export const storageRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Create storage
-  fastify.post('/', {
-    schema: {
-      body: createStorageSchema,
-    },
-  }, async (request, reply) => {
+  fastify.post('/', async (request, reply) => {
     if (!request.user) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
-    const { name, sizeLimit } = request.body as z.infer<typeof createStorageSchema>;
+    const parsed = createStorageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const { name, sizeLimit } = parsed.data;
     const { serverId } = request.user;
 
       // Check server storage limit
@@ -135,18 +136,19 @@ export const storageRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   // Update storage
-  fastify.patch('/:storageId', {
-    schema: {
-      body: updateStorageSchema,
-    },
-  }, async (request, reply) => {
+  fastify.patch('/:storageId', async (request, reply) => {
     if (!request.user) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
 
+    const parsed = updateStorageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
     const { serverId } = request.user;
     const { storageId } = request.params as { storageId: string };
-    const updates = request.body as z.infer<typeof updateStorageSchema>;
+    const updates = parsed.data;
 
     try {
       const storageConfig = await mongoService.getStorageConfig(serverId, storageId);

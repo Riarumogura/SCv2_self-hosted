@@ -50,7 +50,7 @@ http://local.sawarachats.chat {
 
 	route /storage* {
 		uri strip_prefix /storage
-		reverse_proxy http://storage-api:3001 {
+		reverse_proxy http://storage-api:3000 {
 			header_down Location "^/" "/storage/"
 		}
 	}
