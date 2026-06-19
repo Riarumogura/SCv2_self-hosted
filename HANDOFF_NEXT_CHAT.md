@@ -114,16 +114,21 @@ await page.locator("button:visible", { hasText: "作成" }).last().click();
 // 5. ストレージエクスプローラーを開く(サイドバーのストレージ名をクリック)
 await page.getByText(storageName).first().click();
 
-// 6. フォルダ作成・名前変更・移動・削除(ハードコード日本語なのでテキストで特定できる)
+// 6. フォルダ作成・名前変更・移動・削除
+// CUSTOM: 11章の変更により、操作(名前変更/移動/削除、ダウンロード/削除)は常時表示の
+// ボタンではなく、対象の行を右クリックして開く StorageEntryContextMenu から行う。
+// use:floatingはセル内側のdivに配線されているため、tdではなく中のテキストに対して
+// dispatchEvent("contextmenu")する(クリック座標の移動経由だとメニューが閉じる場合がある)。
 queuePrompt("FolderA");
 await page.getByRole("button", { name: "新規フォルダ" }).click();
 
-const row = page.locator("tr", { hasText: "FolderA" }).first();
 queuePrompt("FolderA-Renamed");
-await row.getByRole("button", { name: "名前変更" }).click();
+await page.getByText("FolderA", { exact: true }).dispatchEvent("contextmenu");
+await page.getByText("名前変更").last().click();
 
 // 移動: SelectFolderModalが開く。フォルダ名ボタンは "📁 フォルダ名" の形式
-await page.getByRole("button", { name: "移動" }).click(); // 該当行のボタン
+await page.getByText("FolderA-Renamed", { exact: true }).dispatchEvent("contextmenu");
+await page.getByText("移動").last().click();
 await page.getByRole("button", { name: "📁 行き先フォルダ名" }).click();
 // 「現在のパスを選択」ボタン(行き先フォルダ名を含む幅100%ボタン、Transで文字化けするため構造で特定)
 await page.locator("button:visible").filter({ hasText: "行き先フォルダ名" }).last().click();
@@ -132,7 +137,8 @@ const btns = page.locator("button:visible");
 await btns.nth((await btns.count()) - 1).click();
 
 queueConfirm(true);
-await row.getByRole("button", { name: "削除" }).click();
+await page.getByText("FolderA-Renamed", { exact: true }).dispatchEvent("contextmenu");
+await page.getByText("削除").last().click();
 
 // 7. ストレージの編集・削除(サイドバーの鉛筆/ゴミ箱アイコン、Transで文字化けするため構造で特定)
 // storageItem = テキストが storageName の要素から2階層上の親(StorageItem全体)
@@ -173,8 +179,8 @@ await page.locator('input[placeholder="ファイルを検索..."]').fill("");
 - サインアップ・ログイン・サーバー作成
 - ストレージ作成・編集(名前・容量上限変更)・削除
 - ストレージエクスプローラーを開く、新規フォルダ作成
-- フォルダの名前変更・移動(別フォルダの中への移動)・削除(配下含めて再帰削除、使用量も正しく減算)
-- ファイルアップロード(ファイル選択 / ドラッグ&ドロップ)・ダウンロード・削除
+- フォルダの名前変更・移動(別フォルダの中への移動)・削除(配下含めて再帰削除、使用量も正しく減算)。操作は行を右クリックして開く `StorageEntryContextMenu` から行う(常時表示の操作ボタンは廃止済み)
+- ファイルアップロード(ファイル選択 / ドラッグ&ドロップ)・ダウンロード・削除(ダウンロード/削除も同様に右クリックメニューから)
 - 容量表示バー: サーバー全体(サイドバー)・各ストレージ(サイドバー)・開いているストレージ単体(エクスプローラー)
 - パストラバーサル(`../`)対策
 - サーバーサイド検索(`GET /storage/:storageId/search?q=...`、ストレージ全体を再帰検索、パス付きで結果表示)
