@@ -277,7 +277,7 @@ docker compose up -d web
 ## 6. 今回触れていない既知の課題
 
 - `SCv2_self-hosted` リポジトリでは `services/storage-api/node_modules` が `.gitignore` 対象外でgit管理されている。本来 `npm ci` で再生成されるべきものであり、今後 `.gitignore` に追加して整理することを推奨する。
-- 画像/PDF等のインラインプレビュー、サーバーサイド検索バー(エクスプローラー側はクライアントサイドの簡易フィルタのみ)は未実装(`STORAGE_HANDOFF_P3.md` のフェーズ3タスクの一部は依然未着手)。
+- 画像/PDF等のインラインプレビュー、サーバーサイド検索バー(エクスプローラー側はクライアントサイドの簡易フィルタのみ)は未実装(`STORAGE_HANDOFF_P3.md` のフェーズ3タスクの一部は依然未着手)。→ **8章で実装済み。**
 
 ## 7. フォルダ操作・ストレージ管理UI・容量表示バーの実装
 
@@ -312,3 +312,26 @@ docker compose up -d web
 
 `local.sawarachats.chat` 上でPlaywright(ヘッドレスChrome)により以下を一通り確認した: サインアップ→サーバー作成→ストレージ作成→フォルダ作成→フォルダ名変更→フォルダ移動(移動先フォルダの中に正しく入ることを確認)→容量バー表示→フォルダ削除→ストレージ容量上限の編集→ストレージ削除(サイドバーから消え、サーバー全体の使用量も0に戻ることを確認)。
 - フォルダの削除はバックエンド(`MinioService.deleteFolder`)には実装済みだが、対応するAPIルート・UIボタンは未実装。
+
+## 8. インラインプレビュー・サーバーサイド検索の実装
+
+`HANDOFF_NEXT_CHAT.md` に記載の残り2項目を実装した。
+
+1. **サーバーサイド検索**
+   - `storage-api`: `GET /storage/:storageId/search?q=...` を追加。`MinioService.searchFiles()` で `listObjectsV2(bucket, basePrefix, recursive=true)` を使いストレージ全体を再帰的に走査し、ファイル名(拡張子を含むベース名)の大文字小文字を区別しない部分一致でフィルタする。結果は `{ name, path, type, size, lastModified }` のフラットな配列(`path` はストレージルートからの相対パス)。
+   - フロントエンド: `storage.ts` に `searchFiles()` を追加。`StorageExplorer.tsx` の検索ボックス入力を300msデバウンスしてこのAPIを呼び出し、検索クエリが空でない間は通常のフォルダ一覧(`entries`)の代わりに検索結果(`searchResults`、`path` 付き)を表示するようにした。検索結果の各行には親パス(例: `DeepFolder/`)を小さく表示する。検索クエリを空にすると通常のフォルダ一覧表示に戻る。
+   - 既存のファイル/フォルダ操作(ダウンロード・削除・名前変更・移動)は、検索結果由来のエントリ(`path` 付き)でも正しいフルパスを使うように `entryPath()` ではなく新設の `getEntryFullPath()` を経由させた。フォルダの名前変更・移動も、`currentPath()` ではなく対象エントリの実際の親パスから新しいパスを組み立てるように修正し、検索結果からの操作でも壊れないようにした。
+2. **インラインプレビュー(画像・動画・PDF・テキスト)**
+   - 拡張子からファイル種別(`image`/`movie`/`pdf`/`text`/`file`/`folder`)を判定するロジックを `storage.ts` の `getFileKind()` に集約し、`StorageExplorer.tsx` のアイコン表示と新規プレビューモーダルの両方から共有するようにした(分岐ロジックの重複を避けるため)。
+   - `storage.ts` の `downloadFile()` 内部のBlob取得処理を `fetchFileBlob()` として切り出し、ダウンロードとプレビューの両方から再利用できるようにした。
+   - 新規モーダル `components/modal/modals/StoragePreview.tsx`(`type: "storage_preview"`)を追加。画像は `<img>`、動画は `<video controls>`、PDFは `<iframe>`、テキスト(txt/md/json/log)は `blob.text()` で読み込んで `<pre>` に表示する。テキストは1MB超の場合プレビューせず「ダウンロードしてください」と案内する。それ以外の拡張子も同様にダウンロードを案内する。取得したBlob URLは `onCleanup` で確実に `URL.revokeObjectURL()` する。既存の `ImageViewerModal`(チャット添付ファイル用、Panzoom等の複雑な機能を持つ)とは別に、ストレージ向けに最小限の専用モーダルとして新設した。
+   - `StorageExplorer.tsx` のファイル行クリック時の挙動を変更: フォルダなら従来通りそのフォルダを開き、ファイルなら上記プレビューモーダルを開くようにした(従来はファイルクリックは無反応だった)。
+
+### 動作確認
+
+`local.sawarachats.chat` 上でPlaywright(ヘッドレスChrome)により以下を確認した:
+- サブフォルダ(`DeepFolder`)内にアップロードしたテキストファイルを、ルートから検索ボックスでファイル名検索すると、パス付き(`DeepFolder/xxx.txt`)で1件ヒットすることを確認。
+- 検索結果のファイル行をクリックするとプレビューモーダルが開き、アップロードしたテキスト内容がそのまま表示されることを確認(スクリーンショットで目視確認済み)。
+- 検索ボックスを空にすると、通常のフォルダ一覧表示(`DeepFolder` が見える状態)に戻ることを確認。
+- 1x1の小さなPNG画像をアップロードしてクリックすると、`<img>` 要素(`blob:` URL)としてプレビューが表示されることを確認。
+- 確認用の一時スクリプトは `packages/client/e2e-manual/` に作成し、確認後に削除済み(リポジトリにはコミットしていない)。

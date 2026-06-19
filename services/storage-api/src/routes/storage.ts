@@ -270,6 +270,34 @@ export const storageRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Recursively search files and folders by name across the whole storage
+  fastify.get('/:storageId/search', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+    const { q } = request.query as { q?: string };
+
+    if (!q || !q.trim()) {
+      return reply.code(400).send({ error: 'q query parameter is required' });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    try {
+      const results = await minioService.searchFiles(serverId, storageId, q.trim());
+      return reply.send(results);
+    } catch (error) {
+      console.error('Error searching storage:', error);
+      return reply.code(500).send({ error: 'Failed to search storage' });
+    }
+  });
+
   // Upload a file (multipart/form-data: fields "file" and "path")
   fastify.post('/:storageId/files', async (request, reply) => {
     if (!request.user) {

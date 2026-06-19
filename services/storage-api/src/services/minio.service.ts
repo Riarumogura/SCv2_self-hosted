@@ -8,6 +8,10 @@ export interface StorageEntry {
   lastModified?: Date;
 }
 
+export interface StorageSearchEntry extends StorageEntry {
+  path: string;
+}
+
 export class MinioService {
   private client: Client;
 
@@ -146,6 +150,45 @@ export class MinioService {
     }
 
     return entries;
+  }
+
+  /**
+   * Recursively search files and folders by name (case-insensitive substring match).
+   * Returns flat results with their full relative path inside the storage.
+   */
+  async searchFiles(
+    serverId: string,
+    storageId: string,
+    query: string
+  ): Promise<StorageSearchEntry[]> {
+    const basePrefix = `server_${serverId}/storage_${storageId}/`;
+    const lowerQuery = query.toLowerCase();
+    const results: StorageSearchEntry[] = [];
+
+    const stream = this.client.listObjectsV2(config.minio.bucket, basePrefix, true);
+
+    for await (const obj of stream) {
+      if (!obj.name) continue;
+      const relative = obj.name.slice(basePrefix.length);
+      if (!relative) continue;
+
+      const isFolder = relative.endsWith('/');
+      const trimmed = isFolder ? relative.slice(0, -1) : relative;
+      if (!trimmed) continue;
+
+      const baseName = trimmed.split('/').pop() || '';
+      if (!baseName.toLowerCase().includes(lowerQuery)) continue;
+
+      results.push({
+        name: baseName,
+        path: trimmed,
+        type: isFolder ? 'folder' : 'file',
+        size: isFolder ? 0 : obj.size ?? 0,
+        lastModified: isFolder ? undefined : obj.lastModified,
+      });
+    }
+
+    return results;
   }
 
   /**
