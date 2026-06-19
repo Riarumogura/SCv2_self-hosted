@@ -335,3 +335,29 @@ docker compose up -d web
 - 検索ボックスを空にすると、通常のフォルダ一覧表示(`DeepFolder` が見える状態)に戻ることを確認。
 - 1x1の小さなPNG画像をアップロードしてクリックすると、`<img>` 要素(`blob:` URL)としてプレビューが表示されることを確認。
 - 確認用の一時スクリプトは `packages/client/e2e-manual/` に作成し、確認後に削除済み(リポジトリにはコミットしていない)。
+
+## 9. 「送信したファイルをストレージに保存」機能が「Loading Storage」表示で止まる不具合の修正
+
+### 発生していた問題
+
+メッセージに添付されたファイル(画像・動画・音声、`MessageContextMenu.tsx`)の右クリックメニューから「ストレージに保存」を選んでも、保存先ストレージの一覧が表示されず「Loading storages...」のまま止まる。サーバーにストレージは実際に存在している。
+
+### 原因
+
+`components/app/menus/MessageContextMenu.tsx` で、ストレージ一覧取得関数 `loadStorages()` は `ContextMenuSubMenu` の `onClick` プロパティとして渡されていた。しかし `ContextMenu.tsx` の `ContextMenuSubMenu` 実装(187〜198行目付近)は、`onClick` が渡された場合に内部のクリックでの開閉トグル(`setShow(...)`)を完全にスキップし、`onClick` の呼び出しのみを行う仕組みになっている。一方でサブメニューは `onMouseEnter` でも独立して開く(`setShow` する)ため、ユーザーがクリックせずホバーだけでサブメニューを開いた場合、`loadStorages()` が一度も呼ばれず、`storages` 信号が空のまま「Loading storages...」のフォールバック表示が永久に残ってしまう。
+
+`ContextMenuSubMenu` のこの「`onClick` 指定時はクリックトグルを無効化する」仕様自体は、`ServerContextMenu.tsx`/`NotificationContextMenu.tsx` の「サーバーをミュート」(クリックで即ミュート、ホバーで詳細期間オプションを表示)という別の意図的な挙動のために必要なものなので、共有コンポーネント側は変更せず、呼び出し側(`MessageContextMenu.tsx`)だけを修正した。
+
+### 修正内容
+
+- `loadStorages()` を `ContextMenuSubMenu` の `onClick` に渡すのをやめ、`MessageContextMenu` コンポーネントの `onMount` で(`props.file` がある場合のみ)即時に呼び出すように変更。`MessageContextMenu` はコンテキストメニューを開くたびに新規マウントされるコンポーネントのため、クリックやホバーといった追加の操作を要求せず、メニューが開いた時点でストレージ一覧の取得が始まるようになった。
+- ストレージ一覧が空配列のまま(`loading()` が `false`)の場合のフォールバック文言を「Loading storages...」から「No storages found」に分岐するように修正(実際にロード中なのか、ロード済みで0件なのかを区別できるようにした)。
+
+### 動作確認
+
+`docker build`/`docker compose up -d web` で反映し、Playwright(ヘッドレスChrome)で画像添付ファイルを送信→右クリックでファイル用コンテキストメニューを開き、「ストレージに保存」(現状はi18nカタログ未再生成のためハッシュ文字列表示、8章までと同じ既知バグ)のサブメニューが描画されることを確認。ホバーのみでサブメニューを開いた状態で「Loading storages...」の文字列がページ上に残らないことを確認した。
+ただし、ホバーのみでサブメニューを開いた直後の表示内容(ストレージ名の一覧が描画されているか)については、ヘッドレスChromeでの自動テスト中にグローバルな「メニュー外クリックで閉じる」リスナー(`FloatingManager.tsx` の `document.addEventListener("mousedown"/"click", ...)`)とPlaywrightの合成イベントが干渉し、メニューが安定して開いたままにならず自動検証しきれなかった。コード上の原因と修正内容は上記の通り単純かつ確実なロジック変更であり、実機のブラウザでの手動確認を推奨する。
+
+### 副次的に見つかった別の既知ギャップ(未修正)
+
+`components/ui/components/features/messaging/elements/Attachment.tsx` の `Match when={props.file.metadata.type === "File"}` および `"Text"` の分岐には、Image/Video/Audioと異なり `use:floating={{ contextMenu: ... }}` が配線されていない。そのため、汎用ファイル添付やテキストファイル添付を右クリックすると、添付固有のコンテキストメニュー(「ストレージに保存」を含む)が一切開かず、メッセージ全体の汎用コンテキストメニューにフォールバックしてしまう。今回はメッセージコンテキストメニュー自体の不具合修正にとどめ、このギャップへの対応(File/Text用のコンテキストメニュー配線追加)は別タスクとして扱うことを推奨する。
