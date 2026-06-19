@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import axios from 'axios';
 import { MongoDBService } from '../services/mongodb.service';
 import { MinioService } from '../services/minio.service';
 import { config } from '../config';
@@ -13,6 +14,26 @@ const updateStorageSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   sizeLimit: z.number().int().positive().max(1024 * 1024 * 1024 * 1024).optional(), // 1TB max
 });
+
+const pathBodySchema = z.object({
+  path: z.string().min(1).max(1024),
+});
+
+const copyFileSchema = z.object({
+  sourceUrl: z.string().url(),
+  destinationPath: z.string().min(1).max(1024),
+});
+
+/**
+ * CUSTOM: クライアント指定のパスを正規化し、`..` 等によるディレクトリトラバーサルを防ぐ
+ */
+function sanitizePath(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && segment !== '.' && segment !== '..')
+    .join('/');
+}
 
 export const storageRoutes: FastifyPluginAsync = async (fastify) => {
   const mongoService = new MongoDBService();
@@ -213,6 +234,263 @@ export const storageRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       console.error('Error deleting storage:', error);
       return reply.code(500).send({ error: 'Failed to delete storage' });
+    }
+  });
+
+  // List files and folders at a path (one level, non-recursive)
+  fastify.get('/:storageId/files', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+    const { path } = request.query as { path?: string };
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    try {
+      const entries = await minioService.listFilesAndFolders(
+        serverId,
+        storageId,
+        path ? sanitizePath(path) : ''
+      );
+      return reply.send(entries);
+    } catch (error) {
+      console.error('Error listing files:', error);
+      return reply.code(500).send({ error: 'Failed to list files' });
+    }
+  });
+
+  // Upload a file (multipart/form-data: fields "file" and "path")
+  fastify.post('/:storageId/files', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    let destinationPath = '';
+    let fileBuffer: Buffer | undefined;
+    let contentType = 'application/octet-stream';
+
+    try {
+      for await (const part of request.parts()) {
+        if (part.type === 'file') {
+          fileBuffer = await part.toBuffer();
+          contentType = part.mimetype || contentType;
+          if (!destinationPath) {
+            destinationPath = part.filename;
+          }
+        } else if (part.fieldname === 'path' && typeof part.value === 'string') {
+          destinationPath = part.value;
+        }
+      }
+    } catch (error) {
+      console.error('Error parsing upload:', error);
+      return reply.code(400).send({ error: 'Failed to parse upload' });
+    }
+
+    if (!fileBuffer) {
+      return reply.code(400).send({ error: 'File is required' });
+    }
+
+    const safePath = sanitizePath(destinationPath);
+    if (!safePath) {
+      return reply.code(400).send({ error: 'Invalid file path' });
+    }
+
+    const canUpload =
+      (await mongoService.checkStorageLimit(serverId, storageId, fileBuffer.length)) &&
+      (await mongoService.checkServerStorageLimit(serverId, fileBuffer.length));
+    if (!canUpload) {
+      return reply.code(403).send({ error: 'Storage limit exceeded' });
+    }
+
+    try {
+      await minioService.uploadFile(serverId, storageId, safePath, fileBuffer, contentType);
+      await mongoService.updateStorageUsage(serverId, storageId, fileBuffer.length, 1);
+
+      return reply.code(201).send({
+        name: safePath.split('/').pop(),
+        path: safePath,
+        size: fileBuffer.length,
+        type: contentType,
+        lastModified: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      return reply.code(500).send({ error: 'Failed to upload file' });
+    }
+  });
+
+  // Download a file
+  fastify.get('/:storageId/files/download', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+    const { path } = request.query as { path?: string };
+
+    if (!path) {
+      return reply.code(400).send({ error: 'path query parameter is required' });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(path);
+    const objectName = `server_${serverId}/storage_${storageId}/${safePath}`;
+
+    try {
+      const metadata = await minioService.getFileMetadata(objectName);
+      const stream = await minioService.getObjectStream(objectName);
+
+      reply.header('Content-Type', metadata.contentType);
+      reply.header(
+        'Content-Disposition',
+        `attachment; filename="${encodeURIComponent(safePath.split('/').pop() || 'file')}"`
+      );
+      return reply.send(stream);
+    } catch (error) {
+      console.error('Error downloading file:', error);
+      return reply.code(404).send({ error: 'File not found' });
+    }
+  });
+
+  // Copy a chat attachment URL into storage
+  fastify.post('/:storageId/files/copy', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const parsed = copyFileSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(parsed.data.destinationPath);
+    if (!safePath) {
+      return reply.code(400).send({ error: 'Invalid destination path' });
+    }
+
+    try {
+      const response = await axios.get(parsed.data.sourceUrl, { responseType: 'arraybuffer' });
+      const fileBuffer = Buffer.from(response.data);
+      const contentType =
+        (response.headers['content-type'] as string | undefined) || 'application/octet-stream';
+
+      const canUpload =
+        (await mongoService.checkStorageLimit(serverId, storageId, fileBuffer.length)) &&
+        (await mongoService.checkServerStorageLimit(serverId, fileBuffer.length));
+      if (!canUpload) {
+        return reply.code(403).send({ error: 'Storage limit exceeded' });
+      }
+
+      await minioService.uploadFile(serverId, storageId, safePath, fileBuffer, contentType);
+      await mongoService.updateStorageUsage(serverId, storageId, fileBuffer.length, 1);
+
+      return reply.code(201).send({
+        name: safePath.split('/').pop(),
+        path: safePath,
+        size: fileBuffer.length,
+        type: contentType,
+        lastModified: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Error copying file into storage:', error);
+      return reply.code(500).send({ error: 'Failed to save file to storage' });
+    }
+  });
+
+  // Delete a file
+  fastify.delete('/:storageId/files', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const parsed = pathBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(parsed.data.path);
+    const objectName = `server_${serverId}/storage_${storageId}/${safePath}`;
+
+    try {
+      const metadata = await minioService.getFileMetadata(objectName).catch(() => null);
+      await minioService.deleteFile(objectName);
+
+      if (metadata) {
+        await mongoService.updateStorageUsage(serverId, storageId, -metadata.size, -1);
+      }
+
+      return reply.code(204).send();
+    } catch (error) {
+      console.error('Error deleting file:', error);
+      return reply.code(500).send({ error: 'Failed to delete file' });
+    }
+  });
+
+  // Create a folder
+  fastify.post('/:storageId/folders', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const parsed = pathBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(parsed.data.path);
+    if (!safePath) {
+      return reply.code(400).send({ error: 'Invalid folder path' });
+    }
+
+    try {
+      await minioService.createFolder(serverId, storageId, safePath);
+      return reply.code(201).send({ path: safePath });
+    } catch (error) {
+      console.error('Error creating folder:', error);
+      return reply.code(500).send({ error: 'Failed to create folder' });
     }
   });
 

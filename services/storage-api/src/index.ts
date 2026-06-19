@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
@@ -16,6 +17,9 @@ const fastify = Fastify({
 fastify.register(cors, {
   origin: config.corsOrigin,
   credentials: true,
+  // CUSTOM: @fastify/corsのデフォルトはGET,HEAD,POSTのみで、
+  // ストレージAPIで使うPATCH/DELETEを許可しないとプリフライトで弾かれてしまう
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
 });
 
 fastify.register(helmet);
@@ -40,6 +44,12 @@ fastify.register(swagger, {
 
 fastify.register(swaggerUi, {
   routePrefix: '/docs',
+});
+
+fastify.register(multipart, {
+  limits: {
+    fileSize: 1024 * 1024 * 1024, // 1GB per file
+  },
 });
 
 // Register authenticated storage routes

@@ -1,6 +1,13 @@
 import { Client } from 'minio';
 import { config } from '../config';
 
+export interface StorageEntry {
+  name: string;
+  type: 'file' | 'folder';
+  size: number;
+  lastModified?: Date;
+}
+
 export class MinioService {
   private client: Client;
 
@@ -52,13 +59,21 @@ export class MinioService {
    */
   async downloadFile(objectName: string): Promise<Buffer> {
     const stream = await this.client.getObject(config.minio.bucket, objectName);
-    
+
     const chunks: Buffer[] = [];
     for await (const chunk of stream) {
       chunks.push(chunk);
     }
-    
+
     return Buffer.concat(chunks);
+  }
+
+  /**
+   * Get a readable stream for a file, for proxying downloads without
+   * buffering the whole file in memory
+   */
+  async getObjectStream(objectName: string) {
+    return this.client.getObject(config.minio.bucket, objectName);
   }
 
   /**
@@ -88,6 +103,49 @@ export class MinioService {
     }
     
     return objects;
+  }
+
+  /**
+   * List files and folders directly inside a path (non-recursive),
+   * for rendering one level of an explorer UI at a time.
+   */
+  async listFilesAndFolders(
+    serverId: string,
+    storageId: string,
+    folderPath: string = ''
+  ): Promise<StorageEntry[]> {
+    const basePrefix = `server_${serverId}/storage_${storageId}/`;
+    const normalizedPath = folderPath.replace(/^\/+|\/+$/g, '');
+    const fullPrefix = normalizedPath ? `${basePrefix}${normalizedPath}/` : basePrefix;
+
+    const entries: StorageEntry[] = [];
+    const stream = this.client.listObjectsV2(config.minio.bucket, fullPrefix, false);
+
+    for await (const obj of stream) {
+      // CUSTOM: minio-jsはrecursive=falseの場合、フォルダ(共通プレフィックス)を
+      // { prefix: 'foo/' } の形で、ファイルを { name, size, lastModified } の形で返す
+      const rawKey = (obj as { prefix?: string }).prefix ?? obj.name;
+      if (!rawKey) continue;
+
+      const relative = rawKey.slice(fullPrefix.length);
+      if (!relative) continue;
+
+      if (rawKey.endsWith('/')) {
+        // フォルダ自身を表す空オブジェクト(createFolderで作成したマーカー)はスキップ
+        const folderName = relative.replace(/\/$/, '');
+        if (!folderName) continue;
+        entries.push({ name: folderName, type: 'folder', size: 0 });
+      } else {
+        entries.push({
+          name: relative,
+          type: 'file',
+          size: obj.size ?? 0,
+          lastModified: obj.lastModified,
+        });
+      }
+    }
+
+    return entries;
   }
 
   /**

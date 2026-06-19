@@ -179,8 +179,67 @@ Access to fetch at 'http://local.sawarachats.chat/storage/api/v1/...' from origi
 
 ---
 
-## 4. 今回触れていない既知の課題
+## 4. ストレージ機能フェーズ3実装: エクスプローラーUI・ファイル操作
 
-- ストレージ作成成功後、`ServerSidebar.tsx` のストレージ一覧が自動更新されない(3-3参照、フェーズ3未着手のため)。
+3-3で「ストレージの作成」自体は直ったが、`STORAGE_HANDOFF_P3.md` に記載の通り以下は未実装のままだった:
+- 作成したストレージがサイドバーの一覧に出てこない(作成後に再取得していない)
+- ストレージをクリックしてもエクスプローラーが開かない(`console.log` のみ)
+- フォルダ作成・ファイルアップロード・ダウンロード・削除のバックエンドAPIが存在しない
+
+これらを実装し、実際にブラウザ操作で最後まで動くことを確認した。
+
+### 4-1. バックエンド: ファイル/フォルダ操作APIの実装
+
+`services/storage-api` には `POST/GET/PATCH/DELETE /storage` (ストレージ自体のCRUD) しか実装されておらず、ファイル一覧・アップロード・ダウンロード・削除・フォルダ作成のルートが存在しなかった(`src/api/storage.ts` のフロントエンドクライアントだけが先に実装されていた状態)。以下を新規実装した:
+
+- `GET /:storageId/files?path=` — 指定パス直下のファイル/フォルダ一覧(非再帰)
+- `POST /:storageId/files` — ファイルアップロード(`@fastify/multipart`)
+- `GET /:storageId/files/download?path=` — ファイルダウンロード(ストリーミング)
+- `POST /:storageId/files/copy` — チャット添付ファイルのURLを取得してストレージに保存
+- `DELETE /:storageId/files` — ファイル削除
+- `POST /:storageId/folders` — フォルダ作成(空オブジェクトのマーカーを置く方式)
+
+あわせて `MinioService` に非再帰一覧取得用の `listFilesAndFolders()` とストリーミングダウンロード用の `getObjectStream()` を追加。アップロード/削除時には `MongoDBService.updateStorageUsage()` で使用量を増減させ、アップロード前に `checkStorageLimit`/`checkServerStorageLimit` で容量超過を防止している。
+
+**セキュリティ対策**: クライアントから渡される `path`/`destinationPath` はそのままMinIOのオブジェクトキーに組み込まれるため、`../` 等によるディレクトリトラバーサルを防ぐ `sanitizePath()` を実装し、全ファイル/フォルダ操作ルートで適用した(`../../etc` → `etc` に正規化されることを確認済み)。
+
+`@fastify/multipart` (Fastify v5対応の `^10.0.0`) を依存に追加。
+
+### 4-2. CORSがDELETE/PATCHをブロックしていた(7つ目のバグ)
+
+エクスプローラーから「削除」を実行すると以下のエラーになった:
+
+```
+Access to fetch at '.../storage/api/v1/storage/.../files' from origin '...'
+has been blocked by CORS policy: Method DELETE is not allowed by
+Access-Control-Allow-Methods in preflight response.
+```
+
+`@fastify/cors` のデフォルト `methods` は `'GET,HEAD,POST'` のみで、PATCH/DELETEを使うこのAPIには不十分だった。`index.ts` の `cors` 登録に `methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']` を明示して解消した。
+
+### 4-3. 認証チェックがStoat APIのレートリミットに達しやすい設計だった
+
+`authPlugin` はリクエストごとに Stoat API へ2回(`/users/@me`、`/servers/{id}/members/{id}`)問い合わせる実装で、エクスプローラーでの一覧更新やアップロードを連続して行うと、Stoat API側のレートリミット(`429 Too Many Requests`)にすぐ達してしまい、`401 Invalid or expired token` という誤解を招くエラーになっていた。トークン+サーバーIDの組み合わせをキーに30秒のインメモリキャッシュを追加し、問い合わせ頻度を抑えた。あわせて、上流が429を返した場合は内部で握り潰さずそのまま `429` を返すよう修正した。
+
+### 4-4. フロントエンド: エクスプローラーUIの実装とサイドバー連携
+
+- `StorageExplorer.tsx`: 一覧取得を新APIレスポンス形式(`{ name, type: "file"|"folder", size, lastModified }`)に合わせて修正。フォルダクリックでの階層移動、新規フォルダ作成(`window.prompt`)、ファイルアップロード(ファイル選択 / ドラッグ&ドロップ両対応)、ダウンロード、削除(確認ダイアログ付き)を実装。
+- `src/api/storage.ts`: `listFiles`/`uploadFile`/`saveToStorage`/`deleteFile`/`createFolder` のURLをバックエンドの実装(`/storage/:storageId/...` + `X-Server-Id` ヘッダー)に合わせて修正。`downloadFile()` を新規追加(Blob取得→一時URL生成)。型を `StorageFile` から `StorageEntry`(一覧用)/`UploadedFile`(作成・コピー結果用)に分離。
+- `SelectFolder.tsx`: 一覧が新形式になったことに合わせて、存在しない `file.path` 参照を修正。フォルダクリックでその階層に移動できるよう修正(以前は実質機能していなかった)。
+- `ServerSidebar.tsx`: マウント時 / ストレージ作成後に `getStorages()` で一覧を再取得するように修正(以前は空配列で固定だった)。ストレージ項目のクリックで実際にエクスプローラーを開けるようにした。
+- `ServerSidebar.tsx` は `TextChannel.tsx` の子ではなく兄弟コンポーネントとして描画されているため、`TextChannel.tsx` のローカルな `sidebarState` を直接呼び出せない。`src/api/storageExplorerSignal.ts` という小さな共有シグナルを新設し、`ServerSidebar` → (共有シグナル) → `TextChannel` の一方向データフローで「どのストレージを開くか」を伝達するようにした。
+- `components/modal/types.ts` / `CreateStorage.tsx`: `create_storage` モーダルに `onCreated?: () => void` コールバックを追加し、作成成功時に `ServerSidebar` 側の一覧再取得をトリガーできるようにした(`select_folder` モーダルの `onSelect` と同じパターン)。
+- ついでに、このファイル群に残っていた既存の型エラー(`STORAGE_HANDOFF_P3.md`記載の既知の課題: CSSプロパティのキャメルケース指定、`Row align="center"` の誤用、`IconButton` への存在しない `title` prop、`ContextMenuButton` への誤った `_disabled` prop)も合わせて修正した。
+
+### 確認結果
+
+`localhost:5173` で実際に、サインアップ→サーバー作成→ストレージ作成→サイドバーに即時反映→クリックしてエクスプローラーを開く→新規フォルダ作成→ファイルアップロード→一覧表示→ダウンロード(内容が一致)→削除(一覧から消える)、までの一連の操作をエラーなく完走できることを確認した。`curl` でのAPI直接検証でも、使用量(`usedSize`/`fileCount`)が正しく増減することと、パストラバーサル対策が効くことを確認した。
+
+---
+
+## 5. 今回触れていない既知の課題
+
 - `local.sawarachats.chat` のトップ(ログイン前)画面で、見出しテキストが `SEe2gT` / `TRrorc` という文字化けで表示される(`FlowHome.tsx` の `<Trans>Find your community...</Trans>` 等が正しく表示されていない、i18nカタログ関連の不具合と推測)。ログイン機能自体は阻害しないため未対応。
 - `SCv2_self-hosted` リポジトリでは `services/storage-api/node_modules` が `.gitignore` 対象外でgit管理されている。本来 `npm ci` で再生成されるべきものであり、今後 `.gitignore` に追加して整理することを推奨する。
+- フォルダ名変更・移動、画像/PDF等のインラインプレビュー、検索バー(エクスプローラー側はクライアントサイドの簡易フィルタのみ)、容量表示バーのUIへの反映は未実装(`STORAGE_HANDOFF_P3.md` のフェーズ3タスクの一部は依然未着手)。
+- フォルダの削除はバックエンド(`MinioService.deleteFolder`)には実装済みだが、対応するAPIルート・UIボタンは未実装。
