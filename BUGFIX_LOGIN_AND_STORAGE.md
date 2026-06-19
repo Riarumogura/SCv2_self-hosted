@@ -237,7 +237,44 @@ Access-Control-Allow-Methods in preflight response.
 
 ---
 
-## 5. 今回触れていない既知の課題
+## 5. 「エラーが発生してストレージが作成されない」(再発報告)の調査
+
+4までの修正を行った後、改めて「ストレージ作成でエラーが発生する」という報告があった。
+
+**調査**
+
+`mise run dev`(`http://localhost:5173`、Viteがソースを直接配信)で再現を試みたところ、サインアップ→サーバー作成→ストレージ作成までエラーなく完走し(`201 Created`)、サイドバーにも即時反映された。再現しないため、もう一方の起動経路である Docker Compose スタック (`http://local.sawarachats.chat`、`sawarachats-web` というビルド済みイメージを使う `web` コンテナ)を確認した。
+
+```
+docker inspect sawarachats-web --format '{{.Created}}'
+# => 2026-06-16T12:35:30Z (3日前)
+
+git -C SCv2_for-web log -1 --format="%ad"
+# => 2026-06-19 (最新のストレージ修正コミットを含む)
+```
+
+`web` コンテナの Docker イメージは、ストレージ機能関連のコミットを含む**3日分前**にビルドされたものを使い続けていた。実際に `local.sawarachats.chat` で確認すると、サイドバーに「ストレージ」セクション自体が表示されない(=今回の一連の修正がまったく反映されていない古いビルド)ことを確認した。
+
+つまり今回の「サーバーを起動してもエラーが出る/動かない」という報告は、**`for-web` 側のソースコードは直っているが、Dockerで実際に動いている `sawarachats-web` イメージが古いビルドのまま再ビルドされていなかった**ことが原因だった可能性が高い。`mise run dev` (`localhost:5173`) はVite経由でソースを直接読むため最新化されるが、Docker Composeの `web` サービスは `image: sawarachats-web` を参照するだけで `build:` 設定が無く、**コード変更後に手動で `docker build` し直さない限り古いまま動き続ける**。
+
+**対応**
+
+```bash
+cd SCv2_for-web
+docker build -t sawarachats-web .
+cd ../SCv2_self-hosted
+docker compose up -d web
+```
+
+再ビルド後、`local.sawarachats.chat` で再度サインアップ→サーバー作成→ストレージ作成を行い、サイドバーに「ストレージ」セクションが表示され、作成したストレージが一覧に即時反映されることを確認した。エラーは発生しなかった。
+
+**今後の注意点**
+
+`SCv2_for-web` 側のコードを変更した場合、`mise run dev` で見えている内容と、Docker Compose で実際に動いている `local.sawarachats.chat` の内容は別物であり、**`docker build -t sawarachats-web . && docker compose up -d web` を実行しない限り本番相当の起動経路には反映されない**。同様に `services/storage-api` を変更した場合も `docker compose up -d --build storage-api` が必要。
+
+---
+
+## 6. 今回触れていない既知の課題
 
 - `local.sawarachats.chat` のトップ(ログイン前)画面で、見出しテキストが `SEe2gT` / `TRrorc` という文字化けで表示される(`FlowHome.tsx` の `<Trans>Find your community...</Trans>` 等が正しく表示されていない、i18nカタログ関連の不具合と推測)。ログイン機能自体は阻害しないため未対応。
 - `SCv2_self-hosted` リポジトリでは `services/storage-api/node_modules` が `.gitignore` 対象外でgit管理されている。本来 `npm ci` で再生成されるべきものであり、今後 `.gitignore` に追加して整理することを推奨する。
