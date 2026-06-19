@@ -1,4 +1,4 @@
-import { Client } from 'minio';
+import { Client, CopySourceOptions, CopyDestinationOptions } from 'minio';
 import { config } from '../config';
 
 export interface StorageEntry {
@@ -170,23 +170,81 @@ export class MinioService {
   }
 
   /**
-   * Delete folder and all contents
+   * Delete folder and all contents.
+   * Returns the total size and file count that were removed, so callers can
+   * decrement storage_usage accordingly (folder marker objects are excluded).
    */
-  async deleteFolder(serverId: string, storageId: string, folderPath: string): Promise<void> {
-    const prefix = `server_${serverId}/storage_${storageId}/${folderPath}/`;
+  async deleteFolder(
+    serverId: string,
+    storageId: string,
+    folderPath: string
+  ): Promise<{ totalSize: number; fileCount: number }> {
+    // CUSTOM: folderPathが空(ストレージ全体削除)の場合に二重スラッシュになり
+    // MinIOが不正なオブジェクト名として拒否するため、空の場合は付与しない
+    const basePrefix = `server_${serverId}/storage_${storageId}/`;
+    const prefix = folderPath ? `${basePrefix}${folderPath}/` : basePrefix;
     const objects: string[] = [];
-    
+    let totalSize = 0;
+    let fileCount = 0;
+
     const stream = this.client.listObjectsV2(config.minio.bucket, prefix, true);
-    
+
     for await (const obj of stream) {
       if (obj.name) {
         objects.push(obj.name);
+        if (!obj.name.endsWith('/')) {
+          totalSize += obj.size ?? 0;
+          fileCount += 1;
+        }
       }
     }
-    
+
     if (objects.length > 0) {
       await this.client.removeObjects(config.minio.bucket, objects);
     }
+
+    return { totalSize, fileCount };
+  }
+
+  /**
+   * Rename or move a folder (and everything inside it) by copying every
+   * object under the old prefix to the new prefix, then removing the old
+   * objects. MinIO/S3 has no native rename, so this is copy + delete.
+   */
+  async renameFolder(
+    serverId: string,
+    storageId: string,
+    oldFolderPath: string,
+    newFolderPath: string
+  ): Promise<void> {
+    const basePrefix = `server_${serverId}/storage_${storageId}/`;
+    const oldPrefix = `${basePrefix}${oldFolderPath}/`;
+    const newPrefix = `${basePrefix}${newFolderPath}/`;
+
+    const objectNames: string[] = [];
+    const stream = this.client.listObjectsV2(config.minio.bucket, oldPrefix, true);
+    for await (const obj of stream) {
+      if (obj.name) {
+        objectNames.push(obj.name);
+      }
+    }
+
+    // フォルダが空(マーカーオブジェクトのみ存在しない)場合でも、移動先に
+    // フォルダマーカーを作成しておく
+    if (objectNames.length === 0) {
+      await this.createFolder(serverId, storageId, newFolderPath);
+      return;
+    }
+
+    for (const name of objectNames) {
+      const newName = `${newPrefix}${name.slice(oldPrefix.length)}`;
+      await this.client.copyObject(
+        new CopySourceOptions({ Bucket: config.minio.bucket, Object: name }),
+        new CopyDestinationOptions({ Bucket: config.minio.bucket, Object: newName })
+      );
+    }
+
+    await this.client.removeObjects(config.minio.bucket, objectNames);
   }
 
   /**

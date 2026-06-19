@@ -19,6 +19,11 @@ const pathBodySchema = z.object({
   path: z.string().min(1).max(1024),
 });
 
+const moveFolderSchema = z.object({
+  path: z.string().min(1).max(1024),
+  newPath: z.string().min(1).max(1024),
+});
+
 const copyFileSchema = z.object({
   sourceUrl: z.string().url(),
   destinationPath: z.string().min(1).max(1024),
@@ -491,6 +496,79 @@ export const storageRoutes: FastifyPluginAsync = async (fastify) => {
     } catch (error) {
       console.error('Error creating folder:', error);
       return reply.code(500).send({ error: 'Failed to create folder' });
+    }
+  });
+
+  // Rename or move a folder
+  fastify.patch('/:storageId/folders', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const parsed = moveFolderSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(parsed.data.path);
+    const newSafePath = sanitizePath(parsed.data.newPath);
+    if (!safePath || !newSafePath) {
+      return reply.code(400).send({ error: 'Invalid folder path' });
+    }
+    if (newSafePath === safePath || newSafePath.startsWith(`${safePath}/`)) {
+      return reply.code(400).send({ error: 'Cannot move a folder into itself' });
+    }
+
+    try {
+      await minioService.renameFolder(serverId, storageId, safePath, newSafePath);
+      return reply.send({ path: newSafePath });
+    } catch (error) {
+      console.error('Error renaming folder:', error);
+      return reply.code(500).send({ error: 'Failed to rename folder' });
+    }
+  });
+
+  // Delete a folder and everything inside it
+  fastify.delete('/:storageId/folders', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+    const { storageId } = request.params as { storageId: string };
+
+    const parsed = pathBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    const storageConfig = await mongoService.getStorageConfig(serverId, storageId);
+    if (!storageConfig) {
+      return reply.code(404).send({ error: 'Storage not found' });
+    }
+
+    const safePath = sanitizePath(parsed.data.path);
+    if (!safePath) {
+      return reply.code(400).send({ error: 'Invalid folder path' });
+    }
+
+    try {
+      const { totalSize, fileCount } = await minioService.deleteFolder(serverId, storageId, safePath);
+      if (fileCount > 0) {
+        await mongoService.updateStorageUsage(serverId, storageId, -totalSize, -fileCount);
+      }
+      return reply.code(204).send();
+    } catch (error) {
+      console.error('Error deleting folder:', error);
+      return reply.code(500).send({ error: 'Failed to delete folder' });
     }
   });
 

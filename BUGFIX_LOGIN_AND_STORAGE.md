@@ -276,7 +276,39 @@ docker compose up -d web
 
 ## 6. 今回触れていない既知の課題
 
-- `local.sawarachats.chat` のトップ(ログイン前)画面で、見出しテキストが `SEe2gT` / `TRrorc` という文字化けで表示される(`FlowHome.tsx` の `<Trans>Find your community...</Trans>` 等が正しく表示されていない、i18nカタログ関連の不具合と推測)。ログイン機能自体は阻害しないため未対応。
 - `SCv2_self-hosted` リポジトリでは `services/storage-api/node_modules` が `.gitignore` 対象外でgit管理されている。本来 `npm ci` で再生成されるべきものであり、今後 `.gitignore` に追加して整理することを推奨する。
-- フォルダ名変更・移動、画像/PDF等のインラインプレビュー、検索バー(エクスプローラー側はクライアントサイドの簡易フィルタのみ)、容量表示バーのUIへの反映は未実装(`STORAGE_HANDOFF_P3.md` のフェーズ3タスクの一部は依然未着手)。
+- 画像/PDF等のインラインプレビュー、サーバーサイド検索バー(エクスプローラー側はクライアントサイドの簡易フィルタのみ)は未実装(`STORAGE_HANDOFF_P3.md` のフェーズ3タスクの一部は依然未着手)。
+
+## 7. フォルダ操作・ストレージ管理UI・容量表示バーの実装
+
+`HANDOFF_NEXT_CHAT.md` に記載の未実装6項目のうち、以下4項目を実装した。
+
+1. **フォルダ名変更・移動**
+   - `storage-api`: `PATCH /storage/:storageId/folders`(body: `{ path, newPath }`)を追加。`MinioService.renameFolder()` でMinIO配下の全オブジェクトをコピー→削除してリネーム/移動を実現(S3/MinIOにネイティブなrenameはないため)。移動先がフォルダ自身の中になる場合は400を返す。
+   - フロントエンド: `StorageExplorer.tsx` のフォルダ行に「名前変更」「移動」ボタンを追加。「移動」は既存の `select_folder` モーダルを再利用して移動先フォルダを選択する。
+2. **フォルダ削除**
+   - `storage-api`: `DELETE /storage/:storageId/folders`(body: `{ path }`)を追加。`MinioService.deleteFolder()` を拡張し、削除した合計サイズ・ファイル数を返すようにして、`storage_usage` の使用量を正しく減算するようにした。
+   - フロントエンド: フォルダ行に「削除」ボタンを追加(確認ダイアログ付き)。
+3. **容量表示バー**
+   - サーバーサイドバーの「ストレージ」セクションに、`GET /storage/server/limits` を使ったサーバー全体の容量バー(使用量/上限/パーセンテージ)を追加。
+   - 各ストレージ項目にも使用量テキスト(例: `0.0 GB / 256.0 GB`)を追加。
+   - `StorageExplorer.tsx` のヘッダーにも、開いているストレージ単体の容量バー(使用量/上限/パーセンテージ/ファイル数)を追加。
+4. **ストレージの更新・削除UI**
+   - `storage-api` クライアント(`storage.ts`)に `updateStorage` / `deleteStorage` / `getServerLimits` を追加。
+   - 新規モーダル `EditStorage.tsx`(名前・容量上限の変更)、`DeleteStorage.tsx`(削除確認)を追加し、サーバーサイドバーの各ストレージ項目に編集(鉛筆)・削除(ゴミ箱)アイコンを追加。
+
+### 実装中に見つけた既存の不具合(今回まとめて修正)
+
+- **ストレージ削除APIが二重スラッシュで失敗する**: `storage.ts` の「ストレージ削除」ルートは `MinioService.deleteFolder(serverId, storageId, '')` を呼ぶが、`deleteFolder` 内のプレフィックス組み立てが常に `.../storage_{id}/${folderPath}/` という形だったため、`folderPath` が空文字のときに `.../storage_{id}//` という二重スラッシュになり、MinIOが `XMinioInvalidObjectName` で拒否し500が返っていた。これまで「ストレージ全体を削除するUI」自体が存在しなかったため未発覚だった。`folderPath` が空の場合は末尾スラッシュを付与しないように修正。
+- **`DELETE /storage/:storageId` がボディ無しリクエストで400になる**: フロントエンドの `deleteStorage()` がボディを送らないDELETEリクエストに `Content-Type: application/json` を付与していたため、Fastifyの標準JSONボディパーサーが空文字列のJSONパースに失敗し400 Bad Requestを返していた(`deleteFile`/`deleteFolder` はボディがあるため問題なし)。ボディを送らないリクエストでは `Content-Type` ヘッダーを外すよう修正。
+
+### 新たに分かったi18nカタログの不具合の範囲
+
+`HANDOFF_NEXT_CHAT.md` では「`FlowHome.tsx` の見出しのみが文字化けする」という認識だったが、調査の結果、**`<Trans>`/`t` macroを使っている箇所はすべて同様に文字化けする**ことが判明した(例: 既存の `CreateStorage.tsx` モーダルのラベル類、今回追加した `EditStorage.tsx`)。原因は `lingui extract && lingui compile` が、これらのコンポーネントが追加されて以降再実行されておらず、コンパイル済みカタログに該当メッセージIDが存在しないため、フォールバックとしてメッセージのハッシュID(`fV3qzy` のような6文字の文字列)がそのまま表示されてしまうこと。
+一方、`ServerSidebar.tsx` の「ストレージ」セクションや `StorageExplorer.tsx` は方針通り `<Trans>` を使わず日本語をハードコードしているため、この影響を受けない。
+影響はラベル文言の表示のみで機能は阻害しないため今回は未対応(カタログの再生成は全ロケール・全コンポーネントに渡る大きな差分になるため、別タスクとして対応することを推奨)。
+
+### 動作確認
+
+`local.sawarachats.chat` 上でPlaywright(ヘッドレスChrome)により以下を一通り確認した: サインアップ→サーバー作成→ストレージ作成→フォルダ作成→フォルダ名変更→フォルダ移動(移動先フォルダの中に正しく入ることを確認)→容量バー表示→フォルダ削除→ストレージ容量上限の編集→ストレージ削除(サイドバーから消え、サーバー全体の使用量も0に戻ることを確認)。
 - フォルダの削除はバックエンド(`MinioService.deleteFolder`)には実装済みだが、対応するAPIルート・UIボタンは未実装。
