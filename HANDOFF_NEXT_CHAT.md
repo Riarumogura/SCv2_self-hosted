@@ -24,7 +24,6 @@
    cd ../SCv2_self-hosted && docker compose up -d web
    ```
    を実行すること。`mise run dev`(`localhost:5173`)はVite経由でソースを直接見るため、こちらは常に最新。
-   **「Dockerで動かしているのにコードの修正が反映されない」場合は、まずこれを疑うこと。**
 
 2. **`services/storage-api` を変更したら**:
    ```bash
@@ -44,56 +43,160 @@
 
 4. **コミット前は `git status` で `secrets.env` 系を絶対に `git add` しないこと**(self-hosted側)。
 
-5. `services/storage-api/node_modules` が誤って git 管理されている(`.gitignore` 未整備)。Dockerビルドは `npm ci` で再生成するので実害は無いが、ノイズが多いので触る際は注意(今回のセッションでは意図的に放置している)。
+5. `services/storage-api/node_modules` が誤って git 管理されている(`.gitignore` 未整備)。Dockerビルドは `npm ci` で再生成するので実害は無いが、ノイズが多いので触る際は注意(意図的に放置している)。
+
+## ⚡ トークン使用量を抑えるための実装ルール(必ず守ること)
+
+過去のセッションで、動作確認のためのPlaywright試行錯誤や、大きなファイルの全文読み込みでトークンを多く消費した。次回以降は以下を徹底する。
+
+1. **Playwright確認は本ドキュメントの「動作確認の定型フロー」をそのまま使う。** 毎回 `explore*.mjs` のような調査用スクリプトを新規に作って試行錯誤しない。選択子は下記セクションに確定済みのものを記載しているので、それをコピーして使う。
+2. **ファイルを読むときは関係する範囲だけを `offset`/`limit` で読む。** 特に `ServerSidebar.tsx`・`StorageExplorer.tsx`・`storage.ts`(APIクライアント)・`storage-api/src/routes/storage.ts` は数百行あるため、`grep` で対象行を先に特定してから必要な範囲のみ読むこと。
+3. **型チェックはEdit/Write後に自動表示されるIDE診断(diagnostics)で十分。** モノレポ全体に対して `tsc --noEmit` を実行しない(対象パッケージ内で軽量に確認する程度に留める)。
+4. **スクリーンショットは機能ひとつにつき1〜2枚(実装後の確認)に留める。** 毎操作ごとに撮影しない。
+5. **動作確認用の一時スクリプトは `packages/client/e2e-manual/` 配下に作成し、確認が終わったら都度 `rm -rf` で削除してコミットしない。** リポジトリに残さない。
+6. **編集は機能単位でまとめてから行う。** 1つのファイルに対して細切れに何度もEditを繰り返さず、変更点を整理してから編集する。
+7. **このタスク規模ではサブエージェント(Agent tool)を使わない。** 直接ツールで実装・確認まで完結させる。
+8. **Dockerの再ビルドは機能のまとまりごとに1回。** 1行修正するたびに再ビルドしない(関連する変更をまとめてから `docker build`/`docker compose up -d --build` を実行する)。
+9. **既知の構造・パターンは本ドキュメントを正として参照し、コードを読んで再確認する手間を省く。** ただし「コードは変わっている前提」で、実装前に該当ファイルの該当箇所だけ`grep`/該当行読みで現状確認すること(本ドキュメントの記述を無条件に信用して実装しない)。
+
+## 動作確認の定型フロー(Playwright、確定済み)
+
+`local.sawarachats.chat` に対して、ヘッドレスChromeで以下の手順を踏めば毎回サインアップ〜ストレージ操作まで到達できる。新しいテストスクリプトを書くときはこの手順をそのままコピーする。
+
+```js
+import { chromium } from "@playwright/test"; // packages/client から実行すること
+
+const browser = await chromium.launch({
+  headless: true,
+  executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+});
+const page = await browser.newPage();
+
+// dialog(window.prompt/confirm)はキューイングして処理する
+const dialogQueue = [];
+page.on("dialog", async (dialog) => {
+  const handler = dialogQueue.shift();
+  if (handler) await handler(dialog); else await dialog.accept();
+});
+const queuePrompt = (v) => dialogQueue.push((d) => d.accept(v));
+const queueConfirm = (ok = true) => dialogQueue.push((d) => (ok ? d.accept() : d.dismiss()));
+
+// 1. サインアップ
+await page.goto("http://local.sawarachats.chat/login/create");
+await page.locator('input[name="email"]').fill(email);
+await page.locator('input[name="new-password"]').fill(password);
+await page.getByRole("button", { name: "登録" }).click();
+await page.waitForTimeout(2000);
+await page.locator('input[name="username"]').fill(username);
+await page.getByRole("button", { name: "確認" }).click();
+await page.waitForTimeout(3000); // -> /app に到達
+
+// 2. 「What's New」モーダルを閉じる
+await page.keyboard.press("Escape");
+
+// 3. サーバー作成(ホーム画面の "Create a group or server" カードから)
+await page.getByText("Create a group or server").click();
+await page.getByRole("button", { name: "Server", exact: true }).click();
+await page.locator('input[name="name"], input').first().fill(serverName);
+await page.getByRole("button", { name: /Create|作成/i }).last().click();
+await page.waitForTimeout(2500); // -> /server/{id}/channel/{id} に到達
+
+// 4. ストレージ作成(サイドバーの「ストレージ」セクション、空状態なら "作成する" ボタン)
+await page.getByRole("button", { name: "作成する" }).click();
+// ⚠️ CreateStorage/EditStorageモーダルは lingui の <Trans>/t macro を使っており、
+//    カタログ未再生成のためラベルが "fV3qzy" のようなハッシュ文字列で文字化けする(既知バグ、後述)。
+//    ラベルテキストでは要素を特定できないため、構造的セレクタを使う。
+//    モーダルはportalでbody末尾に追加されるので、表示中input/buttonの末尾を使う。
+const visibleInputs = page.locator("input:visible");
+await visibleInputs.nth((await visibleInputs.count()) - 2).fill(storageName); // name欄
+await page.locator("button:visible", { hasText: "作成" }).last().click();
+
+// 5. ストレージエクスプローラーを開く(サイドバーのストレージ名をクリック)
+await page.getByText(storageName).first().click();
+
+// 6. フォルダ作成・名前変更・移動・削除(ハードコード日本語なのでテキストで特定できる)
+queuePrompt("FolderA");
+await page.getByRole("button", { name: "新規フォルダ" }).click();
+
+const row = page.locator("tr", { hasText: "FolderA" }).first();
+queuePrompt("FolderA-Renamed");
+await row.getByRole("button", { name: "名前変更" }).click();
+
+// 移動: SelectFolderModalが開く。フォルダ名ボタンは "📁 フォルダ名" の形式
+await page.getByRole("button", { name: "移動" }).click(); // 該当行のボタン
+await page.getByRole("button", { name: "📁 行き先フォルダ名" }).click();
+// 「現在のパスを選択」ボタン(行き先フォルダ名を含む幅100%ボタン、Transで文字化けするため構造で特定)
+await page.locator("button:visible").filter({ hasText: "行き先フォルダ名" }).last().click();
+// ダイアログ決定ボタン(表示中ボタンの最後)
+const btns = page.locator("button:visible");
+await btns.nth((await btns.count()) - 1).click();
+
+queueConfirm(true);
+await row.getByRole("button", { name: "削除" }).click();
+
+// 7. ストレージの編集・削除(サイドバーの鉛筆/ゴミ箱アイコン、Transで文字化けするため構造で特定)
+// storageItem = テキストが storageName の要素から2階層上の親(StorageItem全体)
+const storageItem = page.locator("text=" + storageName).first().locator("../..");
+await storageItem.locator("button").first().click(); // 編集(鉛筆、1番目のボタン)
+// EditStorageModal: 表示中inputの末尾がsizeLimit欄
+const editInputs = page.locator("input:visible");
+await editInputs.nth((await editInputs.count()) - 1).fill("512");
+const editBtns = page.locator("button:visible");
+await editBtns.nth((await editBtns.count()) - 1).click(); // 保存(表示中ボタンの最後)
+
+await storageItem.locator("button").nth(1).click(); // 削除(ゴミ箱、2番目のボタン)
+const delBtns = page.locator("button:visible");
+await delBtns.nth((await delBtns.count()) - 1).click(); // 削除確定(表示中ボタンの最後)
+```
 
 ## これまでの作業内容(詳細は `SCv2_self-hosted/BUGFIX_LOGIN_AND_STORAGE.md` を参照)
 
-直前のセッションで「ログイン/サインアップができない」「ストレージUIが表示されない」「ストレージ作成時にエラーが出る」という3件の報告を順に調査・修正した。最終的に見つかった原因は10個近くあり、すべて `BUGFIX_LOGIN_AND_STORAGE.md` に詳細を記録済み。要点だけ書くと:
-
-- 開発サーバーが `.env` 未設定で本番Stoatに繋がっていた
-- `storage-api` がFastify v4専用バージョンのプラグインでクラッシュループしていた
-- フロントエンドとバックエンドでAPIのURL構造が不一致(`/servers/{id}/storages` vs `/storage` + `X-Server-Id`ヘッダー)
-- 認証プラグインが `fastify-plugin` でラップされておらず認証情報が伝播していなかった
-- 認証ヘッダーが `Authorization: Bearer` 前提だったが実際は `X-Session-Token`
-- `STOAT_API_URL` のポート番号が間違っていた(3000 → 14702)
-- CORSが `DELETE`/`PATCH` を許可していなかった
-- 認証チェックがリクエスト毎にStoat APIへ2回問い合わせていてレートリミットに達しやすかった(30秒キャッシュを追加)
-- Dockerの `web` イメージが再ビルドされておらず古いコードのまま動いていた
+ログイン/サインアップ不可・ストレージUI未表示・ストレージ作成エラーの3件を修正済み(詳細は `BUGFIX_LOGIN_AND_STORAGE.md` の1〜5章)。続けて、フォルダ操作・容量表示バー・ストレージ管理UIを実装済み(同ドキュメント7章)。
 
 直近のコミット(参照用):
-- `SCv2_self-hosted`: `37c8511` → `4f21817` → `b683dbe` → `5336b36`(最新)
-- `SCv2_for-web`: `846cc259` → `bc201497`(最新)
+- `SCv2_self-hosted`: `787ceea` → `9acfec8`(最新)
+- `SCv2_for-web`: `bc201497` → `6b526929`(最新)
 
-## 現在の状態(動作確認済み)
+## 現在の状態(Playwrightで動作確認済み)
 
-`localhost:5173` と `local.sawarachats.chat` の両方で、以下が一通りエラーなく動作することを確認済み:
-- サインアップ・ログイン
-- サーバー作成
-- ストレージ作成(サイドバーに即時反映される)
-- ストレージエクスプローラーを開く
-- 新規フォルダ作成
-- ファイルアップロード(ファイル選択 / ドラッグ&ドロップ)
-- ファイルダウンロード
-- ファイル削除
-- 容量・使用量のカウント(`usedSize`/`fileCount`)、サーバー全体の容量制限チェック
+`local.sawarachats.chat` で以下が一通りエラーなく動作することを確認済み:
+- サインアップ・ログイン・サーバー作成
+- ストレージ作成・編集(名前・容量上限変更)・削除
+- ストレージエクスプローラーを開く、新規フォルダ作成
+- フォルダの名前変更・移動(別フォルダの中への移動)・削除(配下含めて再帰削除、使用量も正しく減算)
+- ファイルアップロード(ファイル選択 / ドラッグ&ドロップ)・ダウンロード・削除
+- 容量表示バー: サーバー全体(サイドバー)・各ストレージ(サイドバー)・開いているストレージ単体(エクスプローラー)
 - パストラバーサル(`../`)対策
 
 ## 未実装・既知の課題(次にやること)
 
-`STORAGE_HANDOFF_P3.md`(フェーズ3計画)のうち、まだ手を付けていないもの:
+`HANDOFF_NEXT_CHAT.md` で挙げていた6項目のうち、残り2項目:
 
-1. **フォルダ名変更・移動** — バックエンドに該当APIなし
-2. **フォルダ削除** — `MinioService.deleteFolder()` は実装済みだが、対応するAPIルート・UIボタンが無い
-3. **インラインプレビュー**(画像・動画・PDF・テキスト)— 未実装
-4. **検索バー** — `StorageExplorer.tsx` 内のクライアントサイド簡易フィルタのみ。サーバーサイド検索なし
-5. **容量表示バー**(使用量/上限のUI表示)— APIはあるが(`GET /storage/server/limits`、各ストレージの`usedSize`/`sizeLimit`)、UIへの表示が未実装
-6. **ストレージの更新・削除のUI** — `PATCH`/`DELETE /storage/:storageId` のAPIはあるが、サイドバーやモーダルからの操作UIが無い
+1. **インラインプレビュー(画像・動画・PDF・テキスト)**
+   - `StorageExplorer.tsx` のファイル行クリック時に、拡張子に応じてプレビューを表示する(既存の `getEntryIcon()` が拡張子判定をしているので参考にする)。
+   - 既存の `storageApi.downloadFile()` がBlobURLを返す実装になっているので、これをプレビュー表示にも再利用できる(ダウンロード時と同じAPI呼び出しでBlobを取得し、`<a download>` ではなく `<img>`/`<video>`/`<iframe>`/`<pre>` に差し込む)。
+   - 画像: `<img src={blobUrl} />`
+   - 動画: `<video controls src={blobUrl} />`
+   - PDF: `<iframe src={blobUrl} />` または `<embed>`
+   - テキスト(txt/md/json/log等): Blobを `.text()` で読みプレーンテキスト表示。サイズが大きい場合(例: 1MB超)はプレビューせず「ダウンロードしてください」と案内する。
+   - 表示先はモーダル(`Dialog`)でもサイドパネル内でもよいが、既存の `ImageViewerModal`(`components/modal/modals/ImageViewer.tsx`)があるので構造を参考にできるか確認すること。
+   - `BlobURL` は `URL.revokeObjectURL()` を確実に呼ぶこと(メモリリーク防止、既存の `handleDownload` も参照)。
 
-その他の既知バグ(優先度低、機能を阻害しない):
-- `local.sawarachats.chat` のログイン前トップ画面で見出しテキストが `SEe2gT` / `TRrorc` のように文字化けする(`FlowHome.tsx` の `<Trans>` 関連、i18nカタログの不具合と推測。未調査)
+2. **サーバーサイド検索**
+   - 現状: `StorageExplorer.tsx` 内の `searchQuery`/`filteredEntries()` は、**現在開いているフォルダ1階層のみ**を対象にしたクライアントサイドの簡易フィルタ。
+   - 追加: `storage-api` に再帰検索エンドポイントを追加する。例 `GET /storage/:storageId/search?q=...` で、ストレージ全体を再帰的に検索しファイル名がマッチするものを(パス付きで)返す。
+   - `MinioService` に `listObjectsV2(bucket, prefix, true)`(recursive=true)を使った検索メソッドを追加する(既存の `listFiles()` が近い実装なので参考にする)。
+   - フロントエンド: 検索ボックスに何文字か入力したらサーバーサイド検索を呼び出し、結果をフラットなリスト(パス付き)で表示する。検索クエリが空になったら通常のフォルダ一覧表示に戻す。
+   - 大規模ストレージでの検索パフォーマンスは初期実装では気にしなくてよい(まずは正しく動くものを作る)。
+
+## i18nカタログの既知バグ(未対応、別タスク推奨)
+
+`<Trans>`/`t` macroを使っている箇所(`CreateStorage.tsx`・`EditStorage.tsx`・`DeleteStorage.tsx`・`SelectFolder.tsx` 等)は、lingui の翻訳カタログ(`packages/client/components/i18n/catalogs/`)が `lingui extract && lingui compile` で再生成されていないため、メッセージIDのハッシュ文字列(例: `fV3qzy`)がそのまま表示される。`ServerSidebar.tsx`/`StorageExplorer.tsx` は方針通り日本語をハードコードしているため影響を受けない。
+直すには `packages/client` で `npx lingui extract && npx lingui compile` を実行する必要があるが、全ロケール・全コンポーネントに渡る大きな差分になるため、今回は対応していない。対応する場合は専用タスクとして切り出すことを推奨する(今回実装した新機能とは無関係の差分が混在しないように注意)。
 
 ## 作業の進め方について
 
-- 何か変更したら、**必ず実機(ブラウザ)で動作確認すること**。Playwright + ローカルのChromeで自動操作して確認するのがこれまでのやり方(`executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"` でheadless起動、`@playwright/test` は `SCv2_for-web/packages/client` 配下で既に利用可能)。
+- 何か変更したら、**必ず実機(ブラウザ)で動作確認すること**。上記「動作確認の定型フロー」を流用し、新機能の確認コードだけ追記する。
 - 修正したら `BUGFIX_LOGIN_AND_STORAGE.md` に追記し、`SCv2_self-hosted` と `SCv2_for-web` 両方のリポジトリで個別にコミット・pushする(コミットメッセージは日本語、`fix:`/`feat:`/`docs:` プレフィックス)。
 - `services/storage-api/node_modules` や、作業に関係ない既存の未コミット差分(`STORAGE_HANDOFF_P3.md`、`packages/solid-livekit-components` サブモジュール)はコミット対象に含めないこと。
+- 動作確認用の一時スクリプト(`packages/client/e2e-manual/`)はコミットせず、確認後に削除すること。
