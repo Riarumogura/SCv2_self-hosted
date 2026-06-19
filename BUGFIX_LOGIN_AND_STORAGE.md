@@ -369,3 +369,31 @@ docker compose up -d web
 **修正内容**: `"File"`/`"Text"` のMatch分岐で、`AttachmentContainer` を `style={{ display: "contents" }}` を付けた素の `<div use:floating={{ contextMenu: ... }}>` でラップした。`display: contents` によりこのdiv自体はボックスを生成しないためレイアウトに影響を与えず、かつ実DOM要素としてイベントリスナーを配線できる。
 
 **動作確認**: テキストファイル(`.txt`)添付を右クリックすると、添付固有のコンテキストメニュー(Open File / リンクをコピー / Save File / ストレージに保存サブメニュー)が開くことをPlaywrightで確認した(修正前は返信・未読にする等のメッセージ全体向けの汎用メニューしか出ず、添付固有の項目が一切表示されなかった)。
+
+## 10. i18nカタログの再生成(`fV3qzy` 等のハッシュ文字列表示バグの解消)
+
+これまで複数回触れていた既知バグ(`CreateStorage.tsx`・`EditStorage.tsx`・`DeleteStorage.tsx`・`SelectFolder.tsx`・`MessageContextMenu.tsx` の「ストレージに保存」等、`<Trans>`/`t` macroを使う箇所のラベルがメッセージIDのハッシュ文字列のまま表示される問題)を解消した。
+
+### 作業内容
+
+`SCv2_for-web/packages/client` で以下を実行した。
+
+```bash
+npx lingui extract        # ソースコードを走査し、未登録のメッセージを各ロケールの .po カタログに追加
+npx lingui compile --typescript   # .po から実行時用の .ts カタログを生成(ローカル確認用。Dockerビルドでは Dockerfile が自動実行する)
+```
+
+- `lingui.config.ts` の設定により、`.po` ソースカタログ(`components/i18n/catalogs/{locale}/messages.po`)はgit管理対象、コンパイル後の `.ts` ファイルは `catalogs/.gitignore`(`*.ts`)によりgit管理対象外(Dockerビルド時に `Dockerfile` の `pnpm --filter client exec lingui compile --typescript` が毎回生成する)。そのため**コミットが必要なのは `.po` ファイルの差分のみ**。
+- 対象ロケールは72。`extract` の結果、69ロケールの `.po` ファイルに新規メッセージ(`Create Storage`・`Storage Name`・`Save to Storage`・`Loading storages...`・`No storages found` 等、ストレージ機能追加以降に使われ始めていたメッセージ)が追加され、ソースから参照されなくなった既存メッセージ(例: `About`)は削除ではなく `#~`(obsolete)マーカー付きでコメントアウトされた(gettext/linguiの標準動作。翻訳済みテキストは保持され、データロストは発生しない)。
+- 差分は69ファイル・約24000行(ほぼ全ロケールの `.po` カタログへの追記)と大きいが、すべて自動生成された機械的な差分であり手作業の編集は行っていない。
+
+### 動作確認
+
+`docker build`(Dockerfile内で`lingui compile`が自動実行される)→`docker compose up -d --force-recreate web` で反映し、Playwrightで以下を確認した:
+- `CreateStorage` モーダル: 「Create Storage」「Storage Name」「Size Limit (GB)」等、すべて英語のフォールバック表示になり、ハッシュ文字列は完全に解消された(日本語への翻訳はまだ存在しないため英語表示になるが、これは正常な動作)。
+- 画像添付の右クリックメニュー: 「Save To Storage」というラベルで正しく表示されることを確認(修正前は `YClhDP` のようなハッシュ文字列)。
+- 既存の翻訳済み日本語ラベル(「閉じる」「作成」等)は引き続き日本語で表示され、回帰がないことを確認。
+
+### 残課題
+
+- 新規追加されたメッセージの日本語(および他言語)翻訳はまだ存在しないため、当面は英語表示のフォールバックとなる。実際の翻訳を追加する場合は、各 `.po` ファイルの該当 `msgstr` を埋めて再度 `lingui compile` する(翻訳作業自体は今回のスコープ外)。
