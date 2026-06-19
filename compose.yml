@@ -240,8 +240,8 @@ services:
       MONGODB_DB_NAME: sawarachats
       API_PORT: 3000
       API_HOST: 0.0.0.0
-      STOAT_API_URL: http://api:3000
-      CORS_ORIGIN: http://local.sawarachats.chat
+      STOAT_API_URL: http://api:14702
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173
       DEFAULT_SERVER_STORAGE_LIMIT: "274877906944"
     ports:
       - "3001:3000"

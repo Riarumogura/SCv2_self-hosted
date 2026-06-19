@@ -28,7 +28,12 @@ export const config = {
   stoatApiUrl: process.env.STOAT_API_URL || 'http://api:3000',
 
   // CORS
-  corsOrigin: process.env.CORS_ORIGIN || 'http://local.sawarachats.chat',
+  // CUSTOM: mise run dev (localhost:5173) はCaddy経由のDockerスタック(local.sawarachats.chat)とは
+  // 別オリジンになるため、カンマ区切りで複数オリジンを許可できるようにしている
+  corsOrigin: (process.env.CORS_ORIGIN || 'http://local.sawarachats.chat')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
 
   // Storage Limits (in bytes)
   defaultServerStorageLimit: BigInt(process.env.DEFAULT_SERVER_STORAGE_LIMIT || '274877906944'), // 256GB

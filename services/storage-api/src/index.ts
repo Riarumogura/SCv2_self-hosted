@@ -42,11 +42,14 @@ fastify.register(swaggerUi, {
   routePrefix: '/docs',
 });
 
-// Register authentication plugin
-fastify.register(authPlugin);
-
-// Register routes
-fastify.register(storageRoutes, { prefix: '/api/v1/storage' });
+// Register authenticated storage routes
+// CUSTOM: authPluginとstorageRoutesを同じ子コンテキストにネストして登録することで、
+// fp()でフラット化された認証フックの適用範囲を/api/v1/storage配下に限定し、
+// /health等の他ルートに認証を要求してしまわないようにする
+fastify.register(async (instance) => {
+  await instance.register(authPlugin);
+  await instance.register(storageRoutes, { prefix: '/api/v1/storage' });
+});
 
 // Health check endpoint
 fastify.get('/health', async () => {
