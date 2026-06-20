@@ -2,10 +2,12 @@ import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import {
   MongoDBService,
-  CalendarEvent,
-  EVENT_COLORS,
+  CalendarEventWithColor,
+  TradeColorTakenError,
+  TRADE_COLORS,
   REPEAT_OPTIONS,
   REMINDER_MINUTES_OPTIONS,
+  EDIT_PERMISSIONS,
 } from '../services/mongodb.service';
 
 const createEventSchema = z.object({
@@ -14,8 +16,8 @@ const createEventSchema = z.object({
   location: z.string().max(200).optional(),
   startAt: z.coerce.date(),
   endAt: z.coerce.date(),
-  color: z.enum(EVENT_COLORS).default('blue'),
   repeat: z.enum(REPEAT_OPTIONS).default('none'),
+  editPermission: z.enum(EDIT_PERMISSIONS).default('creator_only'),
 }).refine((data) => data.endAt >= data.startAt, {
   message: 'endAt must not be before startAt',
 });
@@ -26,8 +28,8 @@ const updateEventSchema = z.object({
   location: z.string().max(200).optional(),
   startAt: z.coerce.date().optional(),
   endAt: z.coerce.date().optional(),
-  color: z.enum(EVENT_COLORS).optional(),
   repeat: z.enum(REPEAT_OPTIONS).optional(),
+  editPermission: z.enum(EDIT_PERMISSIONS).optional(),
 });
 
 const listEventsQuerySchema = z.object({
@@ -43,9 +45,18 @@ const remindSchema = z.object({
     }),
 });
 
-function serializeEvent(event: CalendarEvent) {
+const setTradeColorSchema = z.object({
+  color: z.enum(TRADE_COLORS),
+});
+
+function serializeEvent(event: CalendarEventWithColor) {
   const { _id, ...rest } = event;
   return { id: _id.toString(), ...rest };
+}
+
+// CUSTOM: 編集・削除はeditPermissionが'anyone'なら誰でも、'creator_only'なら作成者のみ可能
+function canEdit(event: CalendarEventWithColor, userId: string): boolean {
+  return event.createdBy === userId || event.editPermission === 'anyone';
 }
 
 export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
@@ -58,6 +69,54 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('onClose', async () => {
     await mongoService.disconnect();
   });
+
+  // ---- Trade colors ----
+
+  // List all trade color assignments for the server
+  fastify.get('/trade-colors', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId } = request.user;
+
+    try {
+      const assignments = await mongoService.listTradeColors(serverId);
+      return reply.send(
+        assignments.map((assignment) => ({ userId: assignment.userId, color: assignment.color })),
+      );
+    } catch (error) {
+      console.error('Error listing trade colors:', error);
+      return reply.code(500).send({ error: 'Failed to list trade colors' });
+    }
+  });
+
+  // Set/change my own trade color
+  fastify.put('/trade-colors/me', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    const { serverId, id: userId } = request.user;
+
+    const parsed = setTradeColorSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
+    }
+
+    try {
+      const assignment = await mongoService.setTradeColor(serverId, userId, parsed.data.color);
+      return reply.send({ userId: assignment.userId, color: assignment.color });
+    } catch (error) {
+      if (error instanceof TradeColorTakenError) {
+        return reply.code(409).send({ error: 'このトレードカラーは既に他のユーザーが使用しています' });
+      }
+      console.error('Error setting trade color:', error);
+      return reply.code(500).send({ error: 'Failed to set trade color' });
+    }
+  });
+
+  // ---- Events ----
 
   // List events in a date range
   fastify.get('/events', async (request, reply) => {
@@ -96,6 +155,13 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
     const { serverId, id: userId } = request.user;
 
     try {
+      // CUSTOM: 予定の表示色は作成者のトレードカラーから動的に決まるため、
+      // トレードカラー未設定のユーザーは先に設定してもらう
+      const tradeColor = await mongoService.getTradeColor(serverId, userId);
+      if (!tradeColor) {
+        return reply.code(400).send({ error: 'トレードカラーが未設定です。先にトレードカラーを設定してください' });
+      }
+
       const event = await mongoService.createEvent({ ...parsed.data, serverId, createdBy: userId });
       return reply.code(201).send(serializeEvent(event));
     } catch (error) {
@@ -132,7 +198,7 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { id } = request.params as { id: string };
-    const { serverId } = request.user;
+    const { serverId, id: userId } = request.user;
 
     const parsed = updateEventSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -145,10 +211,20 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: 'Event not found' });
       }
 
+      if (!canEdit(existing, userId)) {
+        return reply.code(403).send({ error: 'この予定は作成者のみ編集できます' });
+      }
+
       const startAt = parsed.data.startAt ?? existing.startAt;
       const endAt = parsed.data.endAt ?? existing.endAt;
       if (endAt < startAt) {
         return reply.code(400).send({ error: 'endAt must not be before startAt' });
+      }
+
+      // CUSTOM: 編集権限自体の変更は作成者のみ許可(他者が'anyone'を悪用して
+      // editPermissionを書き換え、作成者を除く全員をロックアウトする事態を防ぐ)
+      if (parsed.data.editPermission !== undefined && existing.createdBy !== userId) {
+        return reply.code(403).send({ error: '編集権限の変更は作成者のみ行えます' });
       }
 
       const updated = await mongoService.updateEvent(serverId, id, parsed.data);
@@ -169,9 +245,18 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { id } = request.params as { id: string };
-    const { serverId } = request.user;
+    const { serverId, id: userId } = request.user;
 
     try {
+      const existing = await mongoService.getEvent(serverId, id);
+      if (!existing) {
+        return reply.code(404).send({ error: 'Event not found' });
+      }
+
+      if (!canEdit(existing, userId)) {
+        return reply.code(403).send({ error: 'この予定は作成者のみ削除できます' });
+      }
+
       const deleted = await mongoService.deleteEvent(serverId, id);
       if (!deleted) {
         return reply.code(404).send({ error: 'Event not found' });
