@@ -246,6 +246,23 @@ services:
     ports:
       - "3001:3000"
 
+  # Calendar API
+  calendar-api:
+    build: ./services/calendar-api
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      MONGODB_URI: mongodb://database:27017
+      MONGODB_DB_NAME: sawarachats
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      STOAT_API_URL: http://api:14702
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173
+    ports:
+      - "3002:3000"
+
   # Web App
   web:
     # sawarachats-web (custom build from SCv2_for-web)

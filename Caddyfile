@@ -55,5 +55,12 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /calendar* {
+		uri strip_prefix /calendar
+		reverse_proxy http://calendar-api:3000 {
+			header_down Location "^/" "/calendar/"
+		}
+	}
+
 	reverse_proxy http://web:5000
 }
