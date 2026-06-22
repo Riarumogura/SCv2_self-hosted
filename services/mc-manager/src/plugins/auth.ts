@@ -48,15 +48,20 @@ const authPluginImpl: FastifyPluginAsync = async (fastify) => {
   fastify.decorateRequest('user', null);
 
   fastify.addHook('onRequest', async (request, reply) => {
-    // CUSTOM: Stoat(Revolt)のAPIは `X-Session-Token` ヘッダーでセッショントークンを
-    // 受け渡す(storage-api/calendar-apiのauthPluginおよびstoat.jsのClient#authenticationHeaderと同様)。
-    const token = request.headers['x-session-token'] as string | undefined;
+    // CUSTOM: 通常のREST呼び出しはStoat(Revolt)と同様 `X-Session-Token`/`X-Server-Id`
+    // ヘッダーで認証する(storage-api/calendar-apiのauthPluginと同様)。
+    // ただしブラウザのWebSocket APIはカスタムヘッダーを送れないため、コンソールの
+    // WebSocket接続だけはクエリパラメータ(?token=...&serverId=...)からも読めるように
+    // フォールバックする。これはstoat.js自身のEventClient.connect()が本体のWS接続を
+    // token をクエリパラメータで渡している既存パターンと同じ考え方。
+    const query = request.query as { token?: string; serverId?: string };
+    const token = (request.headers['x-session-token'] as string | undefined) ?? query.token;
 
     if (!token) {
       return reply.code(401).send({ error: 'X-Session-Token header missing or invalid' });
     }
 
-    const serverId = request.headers['x-server-id'] as string;
+    const serverId = (request.headers['x-server-id'] as string | undefined) ?? query.serverId;
     if (!serverId) {
       return reply.code(400).send({ error: 'Server ID header missing' });
     }
