@@ -62,5 +62,12 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /mc-manager* {
+		uri strip_prefix /mc-manager
+		reverse_proxy http://mc-manager:3000 {
+			header_down Location "^/" "/mc-manager/"
+		}
+	}
+
 	reverse_proxy http://web:5000
 }

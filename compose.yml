@@ -263,6 +263,33 @@ services:
     ports:
       - "3002:3000"
 
+  # Minecraft Server Manager
+  mc-manager:
+    build: ./services/mc-manager
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      MONGODB_URI: mongodb://database:27017
+      MONGODB_DB_NAME: sawarachats
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      STOAT_API_URL: http://api:14702
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173,http://211.128.55.46:8080
+      MC_DATA_ROOT: /data/minecraft
+      # CUSTOM: mc-managerはDocker-outside-of-Docker構成のため、dockerode経由で
+      # 動的に作るコンテナのBindsには「ホストの実パス」を渡す必要がある
+      # (mc-managerコンテナ内部のパス/data/minecraftをDockerデーモンは解釈できない)。
+      # compose.ymlの設置場所が変わる場合はこの絶対パスも合わせて更新すること。
+      MC_DATA_ROOT_HOST: /Users/wakisakahayato/GitHub/SawaraChats_v2/SCv2_self-hosted/data/minecraft
+      DOCKER_NETWORK: stoat_default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/minecraft:/data/minecraft
+    ports:
+      - "3003:3000"
+
   # Web App
   web:
     # sawarachats-web (custom build from SCv2_for-web)
