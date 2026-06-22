@@ -14,6 +14,20 @@ const fastify = Fastify({
   logger: true,
 });
 
+// CUSTOM: zip展開(unzipper)はアップロードされた任意のファイルをパースするため、
+// サードパーティライブラリ内部のストリームが想定外のタイミングで'error'を出し、
+// リスナーが外れているとプロセス全体がクラッシュすることがある(実際に発生し、
+// zip-extract.service.ts側の主因は修正済みだが、多数ファイルを含む実サーバーzipの
+// パースは経路が多く同種の取りこぼしが今後も起こりうるため、最後の保険として
+// プロセスを落とさずログに残すだけにする。個々のリクエストの異常終了は
+// ハンドラ側のtry/catchで処理する)。
+process.on('uncaughtException', (err) => {
+  fastify.log.error({ err }, 'uncaughtException (process kept alive)');
+});
+process.on('unhandledRejection', (reason) => {
+  fastify.log.error({ reason }, 'unhandledRejection (process kept alive)');
+});
+
 fastify.register(cors, {
   origin: config.corsOrigin,
   credentials: true,

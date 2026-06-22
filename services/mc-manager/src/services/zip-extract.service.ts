@@ -6,6 +6,9 @@ import path from 'path';
 
 const MAX_ENTRIES = 100_000;
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024; // 10GB
+// CUSTOM: アップロード元の接続が切れた/止まった場合に展開処理を永久にハングさせず、
+// 展開済みデータを後始末してエラーを返せるようにする上限(無通信が続いた時間)
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 // CUSTOM: このフォルダ名を含むjarは起動候補から除外する(MOD本体やライブラリ、
 // インストーラーが残した一時ファイル等を「起動すべきサーバーjar」と誤認しないため)。
@@ -49,10 +52,26 @@ export function extractZipStream(
     const pendingWrites: Promise<void>[] = [];
     let settled = false;
 
+    const bumpIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        fail(new ZipExtractError('アップロードが一定時間応答しなかったため中断しました'));
+      }, IDLE_TIMEOUT_MS);
+    };
+
+    // CUSTOM: settledになった後もこの関数自体は呼べる状態を保つ(下のerrorハンドラを
+    // 参照)。実際の後始末はsettled済みなら何もしない。
     const fail = (error: Error) => {
+      clearTimeout(idleTimer);
       if (settled) return;
       settled = true;
-      zipStream.removeAllListeners();
+      // CUSTOM: ここでremoveAllListeners()してはいけない。zipはentryごとに
+      // 独立したzlib inflateストリームを持ち、複数entryが並行処理中に2つ目以降の
+      // entryが少し遅れて別個に'error'を出すことがある(実際のサーバーzipのように
+      // entry数が多い場合に発生しやすい)。先にリスナーを外すと、その2つ目の'error'は
+      // 受け手が誰もいないままNode側に渡り、プロセス全体がuncaughtExceptionで
+      // 落ちる(本機能で実際に発生した障害の原因)。settledフラグのチェックだけで
+      // 重複処理を防ぎ、リスナー自体は最後まで残しておく。
       zipStream.destroy();
       reject(error);
     };
@@ -60,8 +79,18 @@ export function extractZipStream(
     // CUSTOM: forceStream:trueを付けると'entry'イベントが発火しなくなる(unzipper側の
     // 既知の挙動。動作確認の結果、無指定の方がドキュメント通りentryイベントベースで動く)
     const zipStream = fileStream.pipe(unzipper.Parse());
+    let idleTimer = setTimeout(() => {}, 0);
+    bumpIdleTimer();
 
     zipStream.on('entry', (entry: unzipper.Entry) => {
+      bumpIdleTimer();
+
+      // CUSTOM: entry自身が後段(zlib inflate等)からのエラーで destroy された場合に
+      // 備えて、必ずこのentry専用のerrorリスナーを付けておく(上のfail()の説明と同じ理由)。
+      entry.on('error', (err: Error) => {
+        if (!settled) fail(new ZipExtractError(`zipの展開に失敗しました: ${err.message}`));
+      });
+
       if (settled) {
         entry.autodrain();
         return;
@@ -100,6 +129,7 @@ export function extractZipStream(
 
         const writeStream = createWriteStream(safePath);
         entry.on('data', (chunk: Buffer) => {
+          bumpIdleTimer();
           totalBytes += chunk.length;
           if (totalBytes > MAX_TOTAL_BYTES) {
             fail(new ZipExtractError('展開後の合計サイズが上限(10GB)を超えています'));
@@ -128,6 +158,7 @@ export function extractZipStream(
     zipStream.on('error', (err) => fail(new ZipExtractError(`zipの読み込みに失敗しました: ${err.message}`)));
 
     zipStream.on('close', () => {
+      clearTimeout(idleTimer);
       if (settled) return;
       settled = true;
       Promise.all(pendingWrites).then(() => resolve({ jarCandidates }));
