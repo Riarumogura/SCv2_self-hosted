@@ -30,13 +30,22 @@ function mapDockerStatus(state: string | undefined): McServerStatus {
 
 export class DockerService {
   async createContainer(server: McServer): Promise<string> {
+    // CUSTOM: source==='UPLOAD'はzipから展開済みの既存jarをそのまま起動する。
+    // itzgイメージはTYPE=CUSTOM + CUSTOM_SERVER=<既存jarのファイルパス>を渡すと
+    // ダウンロードをスキップしてそのjarを起動する(/image/scripts/start-deployCustomの
+    // `elif [[ -f ${CUSTOM_SERVER} ]]`分岐で確認済み)。EULA/server.properties/world
+    // 関連の処理はTYPE分岐の外側の共通処理なので、CUSTOM時も通常通り機能する。
+    const launchEnv =
+      server.source === 'UPLOAD'
+        ? [`TYPE=CUSTOM`, `CUSTOM_SERVER=/data/${server.customJarPath}`]
+        : [`TYPE=${server.type}`, `VERSION=${server.version}`];
+
     const container = await docker.createContainer({
       name: server.containerName,
       Image: MC_IMAGE,
       Env: [
         'EULA=TRUE',
-        `TYPE=${server.type}`,
-        `VERSION=${server.version}`,
+        ...launchEnv,
         `MEMORY=${server.memory}`,
         'ENABLE_RCON=true',
         `RCON_PASSWORD=${server.rconPassword}`,

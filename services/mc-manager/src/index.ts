@@ -5,6 +5,7 @@ import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import websocket from '@fastify/websocket';
+import multipart from '@fastify/multipart';
 import { config } from './config';
 import { authPlugin } from './plugins/auth';
 import { minecraftRoutes } from './routes/minecraft';
@@ -27,6 +28,15 @@ fastify.register(rateLimit, {
 });
 
 fastify.register(websocket);
+
+// CUSTOM: 既存サーバーファイル(zip)のアップロード用。ユーザー確認済みの上限10GBを
+// fileSizeに設定する(storage-apiの1GB設定と同じ位置づけ)。Fastify本体のbodyLimitは
+// multipartには適用されない(busboyベースの別パーサーのため)ので変更不要。
+fastify.register(multipart, {
+  limits: {
+    fileSize: 10 * 1024 * 1024 * 1024,
+  },
+});
 
 fastify.register(swagger, {
   swagger: {
