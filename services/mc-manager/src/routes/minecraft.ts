@@ -273,6 +273,71 @@ export const minecraftRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
+  // ---- Change jar (UPLOAD作成済みサーバーが、選択し直したい場合に後から切り替える) ----
+  // CUSTOM: select-jarはアップロード直後のPENDING_JAR_SELECTION状態でしか使えないため、
+  // 「最初は動かないjarを選んでしまった」場合に切り替える手段がなかった。展開済みデータは
+  // そのまま使い、jarパスとコンテナだけ差し替える(コンテナは次回起動時に新しいImage設定
+  // (java8等)で再作成される)。
+  fastify.post<{ Params: { serverId: string; mcId: string }; Body: unknown }>(
+    '/servers/:serverId/minecraft/:mcId/change-jar',
+    async (request, reply) => {
+      if (!request.user) return reply.code(401).send({ error: 'Unauthorized' });
+      if (!ensureServerIdMatches(request.user, request.params.serverId)) {
+        return reply.code(400).send({ error: 'serverId mismatch' });
+      }
+      if (!requireAdmin(request)) {
+        return reply.code(403).send({ error: 'ManageServer permission required' });
+      }
+
+      const parsed = selectJarSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.flatten() });
+      }
+
+      const server = await mongoService.getServer(request.params.serverId, request.params.mcId);
+      if (!server) return reply.code(404).send({ error: 'Not found' });
+      if (server.source !== 'UPLOAD') {
+        return reply.code(400).send({ error: 'アップロードで作成したサーバーのみjarを切り替えられます' });
+      }
+      if (server.status === 'RUNNING' || server.status === 'STARTING' || server.status === 'STOPPING') {
+        return reply.code(409).send({ error: 'サーバーを停止してから切り替えてください' });
+      }
+
+      const dataRoot = path.resolve(config.mcDataRoot, server.mcId);
+      const fullPath = path.resolve(dataRoot, parsed.data.jarPath);
+      if (fullPath !== dataRoot && !fullPath.startsWith(dataRoot + path.sep)) {
+        return reply.code(400).send({ error: 'invalid jarPath' });
+      }
+      if (!fullPath.toLowerCase().endsWith('.jar')) {
+        return reply.code(400).send({ error: 'jarファイルを指定してください' });
+      }
+      try {
+        await fs.access(fullPath);
+      } catch {
+        return reply.code(400).send({ error: 'jarファイルが見つかりません' });
+      }
+
+      // CUSTOM: 既存コンテナが残っていると次回startで古いImage/設定のまま再利用されてしまうため、
+      // 切り替え時に削除しておく(start()がcontainerId未設定なら新しい設定で再作成する)。
+      if (server.containerId) {
+        try {
+          await dockerService.remove(server.containerId);
+        } catch (error) {
+          const statusCode = (error as { statusCode?: number }).statusCode;
+          if (statusCode !== 404) throw error;
+        }
+      }
+
+      const updated = await mongoService.updateServer(request.params.serverId, request.params.mcId, {
+        customJarPath: parsed.data.jarPath,
+        containerId: null,
+        status: 'CREATED',
+      });
+
+      return serializeServer(updated!);
+    },
+  );
+
   // ---- Get one (status refreshed from Docker if a container exists) ----
   fastify.get<{ Params: { serverId: string; mcId: string } }>(
     '/servers/:serverId/minecraft/:mcId',
@@ -320,7 +385,21 @@ export const minecraftRoutes: FastifyPluginAsync = async (fastify) => {
       if (!server) return reply.code(404).send({ error: 'Not found' });
 
       if (server.containerId) {
-        await dockerService.remove(server.containerId).catch(() => undefined);
+        try {
+          await dockerService.remove(server.containerId);
+        } catch (error) {
+          // CUSTOM: コンテナが既に存在しない(404)場合だけは無視して削除を続行する。
+          // 以前はここで全エラーを無条件に握りつぶしていたため、Dockerデーモンの
+          // 一時的な不調等でコンテナ削除が失敗してもDBレコード・データだけが消え、
+          // コンテナだけが取り残されて(RestartPolicy: unless-stoppedにより)
+          // CUSTOM_SERVER未設定のまま再起動を繰り返す不具合が実際に発生した。
+          // それ以外のエラーは削除全体を失敗させ、コンテナ・データ・DBレコードの
+          // 不整合を防ぐ。
+          const statusCode = (error as { statusCode?: number }).statusCode;
+          if (statusCode !== 404) {
+            throw error;
+          }
+        }
       }
       await fs.rm(path.join(config.mcDataRoot, server.mcId), { recursive: true, force: true });
       await mongoService.deleteServer(request.params.serverId, request.params.mcId);

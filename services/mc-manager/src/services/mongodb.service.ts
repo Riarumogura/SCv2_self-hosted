@@ -184,7 +184,7 @@ export class MongoDBService {
   async updateServer(
     serverId: string,
     mcId: string,
-    updates: Partial<Pick<McServer, 'containerId' | 'status'>>,
+    updates: Partial<Pick<McServer, 'containerId' | 'status' | 'customJarPath'>>,
   ): Promise<McServer | null> {
     return this.servers.findOneAndUpdate(
       { serverId, mcId },

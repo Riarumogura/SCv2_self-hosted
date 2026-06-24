@@ -5,7 +5,13 @@ import { McServer, McServerStatus } from './mongodb.service';
 
 const docker = new Docker({ socketPath: config.dockerSocketPath });
 
-const MC_IMAGE = 'itzg/minecraft-server';
+const MC_IMAGE_LATEST = 'itzg/minecraft-server';
+// CUSTOM: 手動アップロードされたjar(主にForge 1.7~1.12系の古いModpack)は、
+// :latestタグが積んでいる最新Java(java25等)ではLaunchWrapper/AppClassLoaderの
+// ClassCastExceptionで起動に失敗する。Forge 1.12.2系はJava 8が必要なため、
+// UPLOAD経由のサーバーはjava8タグを使う(実際のユーザーのForge 1.12.2サーバーが
+// これで起動できないことを確認して特定した不具合)。
+const MC_IMAGE_JAVA8 = 'itzg/minecraft-server:java8';
 const GAME_PORT = '25565/tcp';
 const RCON_PORT = '25575/tcp';
 
@@ -42,7 +48,7 @@ export class DockerService {
 
     const container = await docker.createContainer({
       name: server.containerName,
-      Image: MC_IMAGE,
+      Image: server.source === 'UPLOAD' ? MC_IMAGE_JAVA8 : MC_IMAGE_LATEST,
       Env: [
         'EULA=TRUE',
         ...launchEnv,
