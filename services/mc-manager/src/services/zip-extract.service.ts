@@ -33,6 +33,23 @@ function isAppleDoubleFile(entryPath: string): boolean {
   return basename.startsWith('._');
 }
 
+// CUSTOM: インストーラーjar(forge-x.x.x-installer.jar等)はGUI/CLIのセットアップ実行用で、
+// 専用サーバーとしてそのまま起動できるjarではないため、候補として一度も表示しない。
+function isInstallerJar(entryPath: string): boolean {
+  const basename = entryPath.split('/').pop() ?? '';
+  return /installer/i.test(basename);
+}
+
+// CUSTOM: Mojang配布の無加工バニラサーバーjar(minecraft_server.<version>.jar / server.jar)。
+// Forge等のMod用jarと一緒にzipへ含まれていることがあるが、Modワールドをこのjarで起動すると
+// サーバーが認識しないMod由来のブロック/エンティティが次回保存時に失われ、Forgeで開き直しても
+// 復元できなくなる(実際にユーザーがこの被害を受けた)。他に候補がある場合は除外し、
+// 本当にバニラサーバーでこれしか無い場合だけ残す。
+function isVanillaServerJar(entryPath: string): boolean {
+  const basename = (entryPath.split('/').pop() ?? '').toLowerCase();
+  return /^minecraft_server[\d.]*\.jar$/.test(basename) || basename === 'server.jar';
+}
+
 /**
  * CUSTOM: zipを「フォルダを右クリックして圧縮」して作った場合、zip内の全ファイルが
  * そのフォルダ名の単一ラップフォルダの中に入る(例: Forge1.12.2SurvivalServer/world/...)。
@@ -185,7 +202,7 @@ export async function extractZipStream(
 ): Promise<ExtractResult> {
   const { files, wrapperName } = await extractZipToDirectory(fileStream, destRoot);
 
-  const jarCandidates: string[] = [];
+  const rawJarCandidates: string[] = [];
   for (const file of files) {
     if (file.type === 'Directory') continue;
     const lower = file.path.toLowerCase();
@@ -193,8 +210,13 @@ export async function extractZipStream(
     const segments = file.path.split('/').map((s) => s.toLowerCase());
     if (segments.some((seg) => EXCLUDED_DIR_SEGMENTS.has(seg))) continue;
     if (isAppleDoubleFile(file.path)) continue;
-    jarCandidates.push(file.path);
+    if (isInstallerJar(file.path)) continue;
+    rawJarCandidates.push(file.path);
   }
+
+  // CUSTOM: Mod用jarが他にもある場合はバニラjarを候補から除外する(isVanillaServerJarの説明参照)。
+  const nonVanillaCandidates = rawJarCandidates.filter((p) => !isVanillaServerJar(p));
+  const jarCandidates = nonVanillaCandidates.length > 0 ? nonVanillaCandidates : rawJarCandidates;
 
   const adjustedJarCandidates = wrapperName
     ? jarCandidates.map((p) =>
