@@ -54,7 +54,7 @@ function serializeServer(server: McServer) {
 // CUSTOM: URLの:serverIdとX-Server-Idヘッダーから認証済みのserverIdが一致しているか確認する。
 // authPluginはヘッダー側のserverIdでStoatへの所属確認・権限計算を行っているため、
 // URL側のserverIdとズレていると別サーバーに対する権限を誤って適用してしまう。
-function ensureServerIdMatches(requestUser: { serverId: string } | null, urlServerId: string): boolean {
+export function ensureServerIdMatches(requestUser: { serverId: string } | null, urlServerId: string): boolean {
   return requestUser?.serverId === urlServerId;
 }
 

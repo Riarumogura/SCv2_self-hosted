@@ -9,6 +9,7 @@ import multipart from '@fastify/multipart';
 import { config } from './config';
 import { authPlugin } from './plugins/auth';
 import { minecraftRoutes } from './routes/minecraft';
+import { minecraftFileRoutes } from './routes/minecraft-files';
 
 const fastify = Fastify({
   logger: true,
@@ -75,6 +76,7 @@ fastify.register(swaggerUi, {
 fastify.register(async (instance) => {
   await instance.register(authPlugin);
   await instance.register(minecraftRoutes, { prefix: '/api/v1' });
+  await instance.register(minecraftFileRoutes, { prefix: '/api/v1' });
 });
 
 fastify.get('/health', async () => {

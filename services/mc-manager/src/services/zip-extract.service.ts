@@ -1,6 +1,6 @@
 import unzipper from 'unzipper';
 import { createWriteStream } from 'fs';
-import { mkdir, rm } from 'fs/promises';
+import { mkdir, rm, readdir, rename } from 'fs/promises';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 import path from 'path';
@@ -31,6 +31,34 @@ const EXCLUDED_DIR_SEGMENTS = new Set([
 function isAppleDoubleFile(entryPath: string): boolean {
   const basename = entryPath.split('/').pop() ?? '';
   return basename.startsWith('._');
+}
+
+/**
+ * CUSTOM: zipを「フォルダを右クリックして圧縮」して作った場合、zip内の全ファイルが
+ * そのフォルダ名の単一ラップフォルダの中に入る(例: Forge1.12.2SurvivalServer/world/...)。
+ * このまま展開するとitzgイメージ・Minecraft本体が期待する/data/world等のパスと
+ * 1階層ズレてしまい、既存のworld/mods/プレイヤーデータ等を読み込めず新規生成してしまう
+ * (実際のユーザーのzipで確認・再現済みの不具合)。destRoot直下が「ディレクトリ1つだけ」
+ * (__MACOSXを除く)の場合に限り、その中身をdestRoot直下へ展開し直す。複数のファイル/
+ * フォルダが直下にある場合(=zipのルートに直接ファイル群を圧縮した一般的なケース)は
+ * 平坦化しない。戻り値は平坦化したラップフォルダ名(平坦化しなかった場合はnull)。
+ */
+export async function flattenSingleWrapperDir(destRoot: string): Promise<string | null> {
+  await rm(path.join(destRoot, '__MACOSX'), { recursive: true, force: true });
+
+  const entries = await readdir(destRoot, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory()) {
+    return null;
+  }
+
+  const wrapperName = entries[0].name;
+  const wrapperPath = path.join(destRoot, wrapperName);
+  const children = await readdir(wrapperPath);
+  for (const child of children) {
+    await rename(path.join(wrapperPath, child), path.join(destRoot, child));
+  }
+  await rm(wrapperPath, { recursive: true, force: true });
+  return wrapperName;
 }
 
 export class ZipExtractError extends Error {}
@@ -86,21 +114,16 @@ async function saveToTempFile(fileStream: NodeJS.ReadableStream, tempPath: strin
 }
 
 /**
- * zipストリームをdestRootへ展開しつつ、起動jarの候補を収集する。
- * CUSTOM: 当初はunzipper.Parse()でストリーミング展開していたが、macOSの「圧縮」機能が
- * 作るzip(__MACOSX配下のリソースフォーク用メタデータファイル)はデータディスクリプタ
- * 形式(ローカルファイルヘッダのサイズが0で、実サイズは後続のディスクリプタに書かれる)を
- * 使い、unzipper.Parse()のストリーミング解析がentry境界を見失って
- * "invalid signature"/"unexpected end of file"を起こすことが実機検証で判明した
- * (実際の参考サーバーzipで再現済み)。central directory(zip末尾の正式な目次)を
- * 読む unzipper.Open.file() + directory.extract() はサイズを目次から正しく取得するため
- * この問題が起きない。central directoryはランダムアクセス(seek)が必要なため、
- * アップロードされたファイルを一旦同じディスク上の一時ファイルに書き出してから開く。
+ * CUSTOM: zipアップロードの共通コア処理(一時ファイル保存→central directory読み込み→
+ * 検証→展開→単一ラップフォルダの平坦化)。サーバー新規作成時のzipアップロードと、
+ * ファイルマネージャーからのフォルダ一括置換えzipアップロードの両方で使う。
+ * 戻り値はcentral directoryのfiles一覧(平坦化前の元パス)とラップフォルダ名
+ * (起動jar候補の算出など、呼び出し側でパス調整が必要な場合に使う)。
  */
-export async function extractZipStream(
+async function extractZipToDirectory(
   fileStream: NodeJS.ReadableStream,
   destRoot: string,
-): Promise<ExtractResult> {
+): Promise<{ files: unzipper.File[]; wrapperName: string | null }> {
   const tempZipPath = `${destRoot}.upload.zip`;
   await mkdir(path.dirname(destRoot), { recursive: true });
 
@@ -134,24 +157,66 @@ export async function extractZipStream(
       }
     }
 
-    const jarCandidates: string[] = [];
-    for (const file of directory.files) {
-      if (file.type === 'Directory') continue;
-      const lower = file.path.toLowerCase();
-      if (!lower.endsWith('.jar')) continue;
-      const segments = file.path.split('/').map((s) => s.toLowerCase());
-      if (segments.some((seg) => EXCLUDED_DIR_SEGMENTS.has(seg))) continue;
-      if (isAppleDoubleFile(file.path)) continue;
-      jarCandidates.push(file.path);
-    }
-
     await mkdir(destRoot, { recursive: true });
     await directory.extract({ path: destRoot, concurrency: 4 });
 
-    return { jarCandidates };
+    const wrapperName = await flattenSingleWrapperDir(destRoot);
+
+    return { files: directory.files, wrapperName };
   } finally {
     await rm(tempZipPath, { force: true });
   }
+}
+
+/**
+ * zipストリームをdestRootへ展開しつつ、起動jarの候補を収集する(サーバー新規作成用)。
+ * CUSTOM: 当初はunzipper.Parse()でストリーミング展開していたが、macOSの「圧縮」機能が
+ * 作るzip(__MACOSX配下のリソースフォーク用メタデータファイル)はデータディスクリプタ
+ * 形式(ローカルファイルヘッダのサイズが0で、実サイズは後続のディスクリプタに書かれる)を
+ * 使い、unzipper.Parse()のストリーミング解析がentry境界を見失って
+ * "invalid signature"/"unexpected end of file"を起こすことが実機検証で判明した
+ * (実際の参考サーバーzipで再現済み)。central directory(zip末尾の正式な目次)を
+ * 読む unzipper.Open.file() + directory.extract() はサイズを目次から正しく取得するため
+ * この問題が起きない。
+ */
+export async function extractZipStream(
+  fileStream: NodeJS.ReadableStream,
+  destRoot: string,
+): Promise<ExtractResult> {
+  const { files, wrapperName } = await extractZipToDirectory(fileStream, destRoot);
+
+  const jarCandidates: string[] = [];
+  for (const file of files) {
+    if (file.type === 'Directory') continue;
+    const lower = file.path.toLowerCase();
+    if (!lower.endsWith('.jar')) continue;
+    const segments = file.path.split('/').map((s) => s.toLowerCase());
+    if (segments.some((seg) => EXCLUDED_DIR_SEGMENTS.has(seg))) continue;
+    if (isAppleDoubleFile(file.path)) continue;
+    jarCandidates.push(file.path);
+  }
+
+  const adjustedJarCandidates = wrapperName
+    ? jarCandidates.map((p) =>
+        p === wrapperName || p.startsWith(`${wrapperName}/`) ? p.slice(wrapperName.length + 1) : p,
+      )
+    : jarCandidates;
+
+  return { jarCandidates: adjustedJarCandidates };
+}
+
+/**
+ * CUSTOM: ファイルマネージャーの「zipをアップロードして指定フォルダへ展開」機能用。
+ * targetDir(例: data/minecraft/{mcId}/world)の既存内容を削除してからzipの内容で
+ * 置き換える。サーバー新規作成時と同じ展開コア処理(central directory方式+
+ * 単一ラップフォルダの平坦化)を再利用する。
+ */
+export async function extractZipToFolderReplacing(
+  fileStream: NodeJS.ReadableStream,
+  targetDir: string,
+): Promise<void> {
+  await rm(targetDir, { recursive: true, force: true });
+  await extractZipToDirectory(fileStream, targetDir);
 }
 
 export async function removeExtractedDir(destRoot: string): Promise<void> {
