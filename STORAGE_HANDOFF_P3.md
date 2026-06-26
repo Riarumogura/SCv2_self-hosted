@@ -53,12 +53,12 @@ revolt-storage/
 - Stoatの既存認証コードは変更しない
 
 ### APIエンドポイント構成
-- `POST /api/v1/storage` - ストレージ作成
-- `GET /api/v1/storage` - ストレージ一覧取得
-- `GET /api/v1/storage/{storageId}` - ストレージ詳細取得
-- `PATCH /api/v1/storage/{storageId}` - ストレージ更新
-- `DELETE /api/v1/storage/{storageId}` - ストレージ削除
-- `GET /api/v1/storage/server/limits` - サーバー容量制限取得
+- `POST /servers/{serverId}/storages` - ストレージ作成
+- `GET /servers/{serverId}/storages` - ストレージ一覧取得
+- `GET /servers/{serverId}/storages/{storageId}` - ストレージ詳細取得
+- `PUT /servers/{serverId}/storages/{storageId}` - ストレージ更新
+- `DELETE /servers/{serverId}/storages/{storageId}` - ストレージ削除
+- `GET /servers/{serverId}/storages/{storageId}/files` - ファイル一覧取得
 
 ### MongoDB コレクション構造
 - **storage_configs**: ストレージ定義（名前・上限・サーバーID）
