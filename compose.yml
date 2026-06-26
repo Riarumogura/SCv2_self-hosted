@@ -217,6 +217,7 @@ services:
       done;
       /usr/bin/mc mb minio/revolt-uploads;
       /usr/bin/mc mb minio/revolt-storage;
+      /usr/bin/mc mb minio/revolt-stamps;
       exit 0;
       "
 
@@ -241,10 +242,37 @@ services:
       API_PORT: 3000
       API_HOST: 0.0.0.0
       STOAT_API_URL: http://api:14702
-      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173,http://211.128.55.46:8080
       DEFAULT_SERVER_STORAGE_LIMIT: "274877906944"
     ports:
       - "3001:3000"
+
+  # Stamp API
+  stamp-api:
+    build: ./services/stamp-api
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minioautumn
+      MINIO_SECRET_KEY: minioautumn
+      MINIO_BUCKET: revolt-stamps
+      MINIO_USE_SSL: "false"
+      MONGODB_URI: mongodb://database:27017
+      MONGODB_DB_NAME: sawarachats
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      STOAT_API_URL: http://api:14702
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173,http://211.128.55.46:8080
+      MAX_STAMPS_PER_SERVER: "60"
+      MAX_STAMP_FILE_SIZE: "2097152"
+    ports:
+      - "3004:3000"
 
   # Calendar API
   calendar-api:
@@ -259,7 +287,7 @@ services:
       API_PORT: 3000
       API_HOST: 0.0.0.0
       STOAT_API_URL: http://api:14702
-      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173,http://211.128.55.46:8080
     ports:
       - "3002:3000"
 

@@ -55,6 +55,13 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /stamps* {
+		uri strip_prefix /stamps
+		reverse_proxy http://stamp-api:3000 {
+			header_down Location "^/" "/stamps/"
+		}
+	}
+
 	route /calendar* {
 		uri strip_prefix /calendar
 		reverse_proxy http://calendar-api:3000 {
