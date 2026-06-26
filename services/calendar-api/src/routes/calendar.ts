@@ -18,6 +18,8 @@ const createEventSchema = z.object({
   endAt: z.coerce.date(),
   repeat: z.enum(REPEAT_OPTIONS).default('none'),
   editPermission: z.enum(EDIT_PERMISSIONS).default('creator_only'),
+  // CUSTOM: 作成者以外で予定に関連付ける追加メンバー。作成者は常にサーバー側で強制的に含める
+  memberIds: z.array(z.string()).max(100).default([]),
 }).refine((data) => data.endAt >= data.startAt, {
   message: 'endAt must not be before startAt',
 });
@@ -30,6 +32,7 @@ const updateEventSchema = z.object({
   endAt: z.coerce.date().optional(),
   repeat: z.enum(REPEAT_OPTIONS).optional(),
   editPermission: z.enum(EDIT_PERMISSIONS).optional(),
+  memberIds: z.array(z.string()).max(100).optional(),
 });
 
 const listEventsQuerySchema = z.object({
@@ -162,7 +165,9 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: 'トレードカラーが未設定です。先にトレードカラーを設定してください' });
       }
 
-      const event = await mongoService.createEvent({ ...parsed.data, serverId, createdBy: userId });
+      // CUSTOM: 作成者は常にメンバーに含める
+      const memberIds = Array.from(new Set([userId, ...parsed.data.memberIds]));
+      const event = await mongoService.createEvent({ ...parsed.data, memberIds, serverId, createdBy: userId });
       return reply.code(201).send(serializeEvent(event));
     } catch (error) {
       console.error('Error creating event:', error);
@@ -227,7 +232,12 @@ export const calendarRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(403).send({ error: '編集権限の変更は作成者のみ行えます' });
       }
 
-      const updated = await mongoService.updateEvent(serverId, id, parsed.data);
+      // CUSTOM: メンバーを更新する場合も作成者は常に含める
+      const updates = parsed.data.memberIds
+        ? { ...parsed.data, memberIds: Array.from(new Set([existing.createdBy, ...parsed.data.memberIds])) }
+        : parsed.data;
+
+      const updated = await mongoService.updateEvent(serverId, id, updates);
       if (!updated) {
         return reply.code(500).send({ error: 'Failed to update event' });
       }

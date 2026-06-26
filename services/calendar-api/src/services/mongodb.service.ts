@@ -15,9 +15,13 @@ export type ReminderMinutes = (typeof REMINDER_MINUTES_OPTIONS)[number];
 export const EDIT_PERMISSIONS = ['anyone', 'creator_only'] as const;
 export type EditPermission = (typeof EDIT_PERMISSIONS)[number];
 
-// CUSTOM: 予定の色は保存せず、表示時に作成者の「現在の」トレードカラーから動的に解決する。
+// CUSTOM: 予定の色は保存せず、表示時に該当メンバーの「現在の」トレードカラーから動的に解決する。
 // これにより、ユーザーがトレードカラーを変更すると過去〜未来の全予定の表示色が
-// 自動的に新しい色になる(イベント側の更新は不要)。
+// 自動的に新しい色になる(イベント側の更新は不要)。該当メンバーが1人ならその人の
+// トレードカラー、2人以上(または0人)なら共有予定として固定のグレー表示にする。
+export const GROUP_EVENT_COLOR = 'gray' as const;
+export type EventDisplayColor = TradeColor | typeof GROUP_EVENT_COLOR;
+
 export interface CalendarEvent {
   _id: ObjectId;
   serverId: string;
@@ -28,12 +32,14 @@ export interface CalendarEvent {
   endAt: Date;
   repeat: RepeatOption;
   editPermission: EditPermission;
+  // CUSTOM: 予定に該当する(関係する)メンバー。作成者は常に含まれる。
+  memberIds: string[];
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type CalendarEventWithColor = CalendarEvent & { color: TradeColor };
+export type CalendarEventWithColor = CalendarEvent & { color: EventDisplayColor };
 
 export interface CalendarReminder {
   _id: ObjectId;
@@ -144,15 +150,20 @@ export class MongoDBService {
 
   // ---- Events ----
 
-  private async resolveColors(serverId: string, createdByIds: string[]): Promise<Map<string, TradeColor>> {
+  private async resolveColors(serverId: string, userIds: string[]): Promise<Map<string, TradeColor>> {
     const assignments = await this.tradeColors
-      .find({ serverId, userId: { $in: createdByIds } })
+      .find({ serverId, userId: { $in: userIds } })
       .toArray();
     return new Map(assignments.map((assignment) => [assignment.userId, assignment.color]));
   }
 
+  // CUSTOM: 該当メンバーが1人ならそのメンバーのトレードカラー、0人/2人以上なら
+  // 共有予定として固定のグレーにする
   private attachColor(event: CalendarEvent, colorsByUserId: Map<string, TradeColor>): CalendarEventWithColor {
-    return { ...event, color: colorsByUserId.get(event.createdBy) ?? DEFAULT_TRADE_COLOR };
+    if (event.memberIds.length === 1) {
+      return { ...event, color: colorsByUserId.get(event.memberIds[0]) ?? DEFAULT_TRADE_COLOR };
+    }
+    return { ...event, color: GROUP_EVENT_COLOR };
   }
 
   async createEvent(data: {
@@ -164,6 +175,7 @@ export class MongoDBService {
     endAt: Date;
     repeat: RepeatOption;
     editPermission: EditPermission;
+    memberIds: string[];
     createdBy: string;
   }): Promise<CalendarEventWithColor> {
     const now = new Date();
@@ -175,7 +187,7 @@ export class MongoDBService {
 
     const result = await this.events.insertOne(event as CalendarEvent);
     const created = { ...event, _id: result.insertedId };
-    const colorsByUserId = await this.resolveColors(data.serverId, [data.createdBy]);
+    const colorsByUserId = await this.resolveColors(data.serverId, data.memberIds);
     return this.attachColor(created, colorsByUserId);
   }
 
@@ -186,7 +198,7 @@ export class MongoDBService {
       .sort({ startAt: 1 })
       .toArray();
 
-    const colorsByUserId = await this.resolveColors(serverId, [...new Set(found.map((event) => event.createdBy))]);
+    const colorsByUserId = await this.resolveColors(serverId, [...new Set(found.flatMap((event) => event.memberIds))]);
     return found.map((event) => this.attachColor(event, colorsByUserId));
   }
 
@@ -195,14 +207,14 @@ export class MongoDBService {
     const found = await this.events.findOne({ _id: new ObjectId(eventId), serverId });
     if (!found) return null;
 
-    const colorsByUserId = await this.resolveColors(serverId, [found.createdBy]);
+    const colorsByUserId = await this.resolveColors(serverId, found.memberIds);
     return this.attachColor(found, colorsByUserId);
   }
 
   async updateEvent(
     serverId: string,
     eventId: string,
-    updates: Partial<Pick<CalendarEvent, 'title' | 'description' | 'location' | 'startAt' | 'endAt' | 'repeat' | 'editPermission'>>
+    updates: Partial<Pick<CalendarEvent, 'title' | 'description' | 'location' | 'startAt' | 'endAt' | 'repeat' | 'editPermission' | 'memberIds'>>
   ): Promise<CalendarEventWithColor | null> {
     if (!ObjectId.isValid(eventId)) return null;
 
@@ -213,7 +225,7 @@ export class MongoDBService {
     );
     if (!result) return null;
 
-    const colorsByUserId = await this.resolveColors(serverId, [result.createdBy]);
+    const colorsByUserId = await this.resolveColors(serverId, result.memberIds);
     return this.attachColor(result, colorsByUserId);
   }
 
@@ -288,7 +300,7 @@ export class MongoDBService {
       );
     }
 
-    const colorsByUserId = await this.resolveColors(serverId, [...new Set(due.map((candidate) => candidate.event.createdBy))]);
+    const colorsByUserId = await this.resolveColors(serverId, [...new Set(due.flatMap((candidate) => candidate.event.memberIds))]);
     return due.map(({ event, ...reminder }) => ({ reminder, event: this.attachColor(event, colorsByUserId) }));
   }
 }
