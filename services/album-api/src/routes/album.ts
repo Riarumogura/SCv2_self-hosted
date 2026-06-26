@@ -7,6 +7,8 @@ import {
   VIEW_PERMISSIONS,
   EDIT_PERMISSIONS,
 } from '../services/mongodb.service';
+import { MinioService } from '../services/minio.service';
+import { config } from '../config';
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be in YYYY-MM-DD format');
 
@@ -55,22 +57,15 @@ const searchQuerySchema = z.object({
     .transform((value) => (value ? value.split(',').filter(Boolean) : undefined)),
 });
 
-const addPhotoSchema = z.object({
-  autumnId: z.string().min(1),
-  tag: z.string().min(1),
-  filename: z.string().optional(),
-  contentType: z.string().optional(),
-  metadata: z.record(z.unknown()),
-  size: z.number().optional(),
-});
-
 function serializeAlbum(album: Album) {
   const { _id, ...rest } = album;
   return { id: _id.toString(), ...rest };
 }
 
+// CUSTOM: objectName(MinIO上の内部キー)はクライアントに公開しない。
+// クライアントはfileIdから/photos/:fileId/fileのURLを組み立てる
 function serializePhoto(photo: AlbumPhoto) {
-  const { _id, albumId, ...rest } = photo;
+  const { _id, albumId, objectName, ...rest } = photo;
   return { id: _id.toString(), albumId: albumId.toString(), ...rest };
 }
 
@@ -92,17 +87,13 @@ function canEdit(album: Album, userId: string): boolean {
   );
 }
 
-export const albumRoutes: FastifyPluginAsync = async (fastify) => {
-  const mongoService = new MongoDBService();
-
-  fastify.addHook('onReady', async () => {
-    await mongoService.connect();
-  });
-
-  fastify.addHook('onClose', async () => {
-    await mongoService.disconnect();
-  });
-
+// CUSTOM: mongoService/minioServiceはindex.tsで1つだけ生成し、認証ありのこのルートと
+// 認証なしのalbumFileRoutesの両方に渡す(stamp-apiと同じパターン、Mongo接続の重複を避ける)
+export function createAlbumRoutes(
+  mongoService: MongoDBService,
+  minioService: MinioService,
+): FastifyPluginAsync {
+  return async (fastify) => {
   // ---- Categories ----
 
   fastify.get('/categories', async (request, reply) => {
@@ -319,8 +310,16 @@ export const albumRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(403).send({ error: 'このアルバムを削除する権限がありません' });
       }
 
-      const deleted = await mongoService.deleteAlbum(serverId, id);
-      if (!deleted) return reply.code(404).send({ error: 'Album not found' });
+      const deletedPhotos = await mongoService.deleteAlbum(serverId, id);
+      if (!deletedPhotos) return reply.code(404).send({ error: 'Album not found' });
+
+      await Promise.all(
+        deletedPhotos.map((photo) =>
+          minioService.deleteFile(photo.objectName).catch((error) => {
+            console.error('Error deleting album photo file from MinIO:', error);
+          }),
+        ),
+      );
       return reply.code(204).send();
     } catch (error) {
       console.error('Error deleting album:', error);
@@ -350,16 +349,14 @@ export const albumRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // CUSTOM: multipart/form-data。"file"がアップロードするバイト列、"type"
+  // ("Image"|"Video"|"File")・"width"・"height"はクライアント側(ブラウザ)で
+  // 読み取った寸法をそのまま受け取る付加フィールド(album-api自身は寸法を解析しない)
   fastify.post('/albums/:id/photos', async (request, reply) => {
     if (!request.user) return reply.code(401).send({ error: 'Unauthorized' });
 
     const { id } = request.params as { id: string };
     const { serverId, id: userId } = request.user;
-
-    const parsed = addPhotoSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.issues });
-    }
 
     try {
       const album = await mongoService.getAlbum(serverId, id);
@@ -368,10 +365,56 @@ export const albumRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(403).send({ error: 'このアルバムに写真を追加する権限がありません' });
       }
 
+      let fileBuffer: Buffer | undefined;
+      let filename = 'file';
+      let contentType = 'application/octet-stream';
+      let metadataType = 'File';
+      let width: number | undefined;
+      let height: number | undefined;
+
+      try {
+        for await (const part of request.parts()) {
+          if (part.type === 'file') {
+            fileBuffer = await part.toBuffer();
+            contentType = part.mimetype || contentType;
+            filename = part.filename || filename;
+          } else if (part.fieldname === 'type' && typeof part.value === 'string') {
+            metadataType = part.value;
+          } else if (part.fieldname === 'width' && typeof part.value === 'string') {
+            width = Number(part.value);
+          } else if (part.fieldname === 'height' && typeof part.value === 'string') {
+            height = Number(part.value);
+          }
+        }
+      } catch (error) {
+        console.error('Error parsing photo upload:', error);
+        return reply.code(400).send({ error: 'アップロードの解析に失敗しました(サイズ上限を超えていないか確認してください)' });
+      }
+
+      if (!fileBuffer) {
+        return reply.code(400).send({ error: 'file is required' });
+      }
+      if (fileBuffer.length > config.maxFileSizeBytes) {
+        return reply.code(413).send({ error: 'ファイルサイズが大きすぎます' });
+      }
+
+      const fileId = mongoService.generateFileId();
+      const objectName = `albums/${fileId}`;
+      await minioService.uploadFile(objectName, fileBuffer, contentType);
+
+      const metadata: Record<string, unknown> = { type: metadataType };
+      if (width !== undefined && !Number.isNaN(width)) metadata.width = width;
+      if (height !== undefined && !Number.isNaN(height)) metadata.height = height;
+
       const photo = await mongoService.addPhoto({
-        ...parsed.data,
         albumId: id,
         serverId,
+        fileId,
+        objectName,
+        filename,
+        contentType,
+        metadata,
+        size: fileBuffer.length,
         uploadedBy: userId,
       });
       return reply.code(201).send(serializePhoto(photo));
@@ -396,10 +439,15 @@ export const albumRoutes: FastifyPluginAsync = async (fastify) => {
 
       const deleted = await mongoService.deletePhoto(id, photoId);
       if (!deleted) return reply.code(404).send({ error: 'Photo not found' });
+
+      await minioService.deleteFile(deleted.objectName).catch((error) => {
+        console.error('Error deleting photo file from MinIO:', error);
+      });
       return reply.code(204).send();
     } catch (error) {
       console.error('Error deleting photo:', error);
       return reply.code(500).send({ error: 'Failed to delete photo' });
     }
   });
-};
+  };
+}

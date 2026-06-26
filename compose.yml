@@ -218,6 +218,7 @@ services:
       /usr/bin/mc mb minio/revolt-uploads;
       /usr/bin/mc mb minio/revolt-storage;
       /usr/bin/mc mb minio/revolt-stamps;
+      /usr/bin/mc mb minio/revolt-albums;
       exit 0;
       "
 
@@ -298,7 +299,15 @@ services:
     depends_on:
       database:
         condition: service_healthy
+      minio:
+        condition: service_started
     environment:
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minioautumn
+      MINIO_SECRET_KEY: minioautumn
+      MINIO_BUCKET: revolt-albums
+      MINIO_USE_SSL: "false"
       MONGODB_URI: mongodb://database:27017
       MONGODB_DB_NAME: sawarachats
       API_PORT: 3000

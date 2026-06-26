@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { MongoClient, Db, ObjectId, Filter } from 'mongodb';
 import { config } from '../config';
 
@@ -39,8 +40,11 @@ export interface AlbumPhoto {
   _id: ObjectId;
   albumId: ObjectId;
   serverId: string;
-  autumnId: string;
-  tag: string;
+  // CUSTOM: 公開用のランダムID(32文字hex)。/photos/:fileId/fileの無認証配信ルートで
+  // 使う(stamp-apiのstampIdと同じ、推測困難性で保護するトラストモデル)
+  fileId: string;
+  // CUSTOM: MinIO上の実際のオブジェクトキー("albums/<fileId>"等)
+  objectName: string;
   filename?: string;
   contentType?: string;
   metadata: Record<string, unknown>;
@@ -87,6 +91,7 @@ export class MongoDBService {
 
     const photosCollection = this.db.collection<AlbumPhoto>('album_photos');
     await photosCollection.createIndex({ albumId: 1, uploadedAt: 1 });
+    await photosCollection.createIndex({ fileId: 1 }, { unique: true });
   }
 
   private get categories() {
@@ -244,14 +249,17 @@ export class MongoDBService {
     return result;
   }
 
-  async deleteAlbum(serverId: string, albumId: string): Promise<boolean> {
-    if (!ObjectId.isValid(albumId)) return false;
+  // CUSTOM: アルバム削除時、MinIO側のオブジェクトも削除する必要があるため、
+  // 削除した写真一覧(objectName込み)をルート層に返す。アルバムが見つからない場合はnull
+  async deleteAlbum(serverId: string, albumId: string): Promise<AlbumPhoto[] | null> {
+    if (!ObjectId.isValid(albumId)) return null;
 
     const result = await this.albums.deleteOne({ _id: new ObjectId(albumId), serverId });
-    if (result.deletedCount > 0) {
-      await this.photos.deleteMany({ albumId: new ObjectId(albumId) });
-    }
-    return result.deletedCount > 0;
+    if (result.deletedCount === 0) return null;
+
+    const deletedPhotos = await this.photos.find({ albumId: new ObjectId(albumId) }).toArray();
+    await this.photos.deleteMany({ albumId: new ObjectId(albumId) });
+    return deletedPhotos;
   }
 
   // ---- Photos ----
@@ -261,11 +269,21 @@ export class MongoDBService {
     return this.photos.find({ albumId: new ObjectId(albumId) }).sort({ uploadedAt: 1 }).toArray();
   }
 
+  // CUSTOM: /photos/:fileId/fileの無認証配信ルート用。albumId/権限チェックは行わず
+  // fileIdだけで引けるようにする(stamp-apiのgetStampと同じ、IDの推測困難性で保護)
+  async getPhotoByFileId(fileId: string): Promise<AlbumPhoto | null> {
+    return this.photos.findOne({ fileId });
+  }
+
+  generateFileId(): string {
+    return randomBytes(16).toString('hex');
+  }
+
   async addPhoto(data: {
     albumId: string;
     serverId: string;
-    autumnId: string;
-    tag: string;
+    fileId: string;
+    objectName: string;
     filename?: string;
     contentType?: string;
     metadata: Record<string, unknown>;
@@ -281,9 +299,9 @@ export class MongoDBService {
     return { ...photo, _id: result.insertedId };
   }
 
-  async deletePhoto(albumId: string, photoId: string): Promise<boolean> {
-    if (!ObjectId.isValid(albumId) || !ObjectId.isValid(photoId)) return false;
-    const result = await this.photos.deleteOne({ _id: new ObjectId(photoId), albumId: new ObjectId(albumId) });
-    return result.deletedCount > 0;
+  // CUSTOM: MinIO側の削除はルート層が行うため、削除した写真(objectName込み)を返す
+  async deletePhoto(albumId: string, photoId: string): Promise<AlbumPhoto | null> {
+    if (!ObjectId.isValid(albumId) || !ObjectId.isValid(photoId)) return null;
+    return this.photos.findOneAndDelete({ _id: new ObjectId(photoId), albumId: new ObjectId(albumId) });
   }
 }
