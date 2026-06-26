@@ -62,6 +62,13 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /album* {
+		uri strip_prefix /album
+		reverse_proxy http://album-api:3000 {
+			header_down Location "^/" "/album/"
+		}
+	}
+
 	route /mc-manager* {
 		uri strip_prefix /mc-manager
 		reverse_proxy http://mc-manager:3000 {

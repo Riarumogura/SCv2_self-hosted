@@ -263,6 +263,23 @@ services:
     ports:
       - "3002:3000"
 
+  # Album API
+  album-api:
+    build: ./services/album-api
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      MONGODB_URI: mongodb://database:27017
+      MONGODB_DB_NAME: sawarachats
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+      STOAT_API_URL: http://api:14702
+      CORS_ORIGIN: http://local.sawarachats.chat,http://localhost:5173,http://211.128.55.46:8080
+    ports:
+      - "3005:3000"
+
   # Minecraft Server Manager
   mc-manager:
     build: ./services/mc-manager
