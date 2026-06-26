@@ -69,6 +69,13 @@ http://local.sawarachats.chat {
 		}
 	}
 
+	route /gameclips* {
+		uri strip_prefix /gameclips
+		reverse_proxy http://gameclips-api:3000 {
+			header_down Location "^/" "/gameclips/"
+		}
+	}
+
 	route /mc-manager* {
 		uri strip_prefix /mc-manager
 		reverse_proxy http://mc-manager:3000 {

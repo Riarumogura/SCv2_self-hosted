@@ -21,8 +21,18 @@ lon = 0.0
 video_resolution = [1920, 1080]
 video_aspect_ratio = [0.3, 10]
 
+[features.limits.new_user.file_upload_size_limits]
+# CUSTOM: GameClipsの動画クリップ(最大100MB程度想定)がAutumnの添付経路を通れるよう、
+# 既定の20MB(file_upload_size_limits.attachments)から引き上げる。
+# attachment_size(旧設定)はrevolt-configのスキーマと一致しておらず実際には
+# 無視されていたため、正しいネストキーで上書きする。
+attachments = 104857600
+
 [features.limits.default]
 video_resolution = [1920, 1080]
 video_aspect_ratio = [0.3, 10]
 attachment_size = 5368709120
 emoji_size = 10485760
+
+[features.limits.default.file_upload_size_limits]
+attachments = 104857600
